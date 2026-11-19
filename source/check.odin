@@ -1,0 +1,489 @@
+package eloqc
+
+import "core:fmt"
+import "core:odin/ast"
+import "core:reflect"
+import "core:strconv"
+import "core:strings"
+
+// What names mean while reading one expression.
+Scope :: struct {
+	parsed:        ^Parsed,
+	procedure:     ^Procedure,
+	flow_type:     ^Type,
+	flow_variable: string,
+	touches_state: bool,
+}
+
+node_location :: proc(scope: ^Scope, node: ^ast.Node) -> Location {
+	return {scope.parsed.location.path, scope.parsed.location.line + node.pos.line - WRAPPER_LINES - 1}
+}
+
+check_program :: proc(program: ^Program) {
+	for type in program.types do complete_type(program, type)
+	for field in program.fields do check_field(program, field)
+	for definition in program.definitions do check_definition(program, definition)
+	for procedure in program.procedures do check_procedure(program, procedure)
+	for &line in program.lines do check_line(program, &line)
+}
+
+complete_type :: proc(program: ^Program, type: ^Type) {
+	if type.alias != nil {
+		scope := Scope{parsed = &type.alias_parsed}
+		array, ok := type.alias.derived.(^ast.Array_Type)
+		if !ok do fail(type.location, "%s: expected an array type", type.name)
+		type.alias = nil
+		type.element, type.count = array_shape(program, &scope, array)
+	}
+	for field in type.fields {
+		if field.type == nil {
+			scope := Scope{parsed = &field.parsed}
+			field.type = resolve_type(program, &scope, field.type_expression)
+		}
+	}
+}
+
+resolve_type :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Type {
+	location := node_location(scope, expression)
+	#partial switch node in expression.derived {
+	case ^ast.Ident:
+		type, ok := program.names[node.name].(^Type)
+		if !ok do fail(location, "%s is not a type", node.name)
+		complete_type(program, type)
+		return type
+	case ^ast.Array_Type:
+		element, count := array_shape(program, scope, node)
+		name := fmt.aprintf("[%d]%s", count, element.name)
+		if existing, found := program.names[name].(^Type); found do return existing
+		type := new_clone(Type{name = name, kind = .Array, element = element, count = count})
+		program.names[name] = type
+		append(&program.types, type)
+		return type
+	}
+	fail(location, "not a type")
+}
+
+array_shape :: proc(program: ^Program, scope: ^Scope, array: ^ast.Array_Type) -> (element: ^Type, count: int) {
+	location := node_location(scope, array)
+	if array.len == nil do fail(location, "an array needs a fixed length")
+	literal, ok := array.len.derived.(^ast.Basic_Lit)
+	if !ok || literal.tok.kind != .Integer do fail(location, "an array needs a fixed integer length")
+	count, _ = strconv.parse_int(literal.tok.text)
+	return resolve_type(program, scope, array.elem), count
+}
+
+check_field :: proc(program: ^Program, field: ^Field) {
+	scope := Scope{parsed = &field.parsed}
+	if field.type_expression != nil {
+		field.type = resolve_type(program, &scope, field.type_expression)
+	}
+	if field.initial == nil {
+		if field.type == nil do fail(field.location, "%s needs a type or a value", field.name)
+		return
+	}
+	initial_type := type_of(program, &scope, field.initial)
+	if scope.touches_state do fail(field.location, "the starting value of %s must be constant", field.name)
+	if field.type == nil {
+		field.type = default_type(initial_type)
+	} else if !accepts(field.type, initial_type) {
+		fail(field.location, "%s is %s, its starting value is %s", field.name, field.type.name, initial_type.name)
+	}
+}
+
+check_definition :: proc(program: ^Program, definition: ^Definition) {
+	switch definition.status {
+	case .Checked:
+		return
+	case .Checking:
+		fail(definition.parsed.location, "%s is defined in terms of itself", definition.name)
+	case .Unchecked:
+	}
+	definition.status = .Checking
+	scope := Scope{parsed = &definition.parsed}
+	type := type_of(program, &scope, definition.expression)
+	definition.constant = !scope.touches_state
+	definition.type = definition.constant ? type : default_type(type)
+	definition.status = .Checked
+}
+
+check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
+	location := procedure.parsed.location
+	scope := Scope{parsed = &procedure.parsed, procedure = procedure}
+
+	for statement in procedure.parsed.statements {
+		assignment, ok := statement.derived.(^ast.Assign_Stmt)
+		if !ok do fail(node_location(&scope, statement), "a proc body holds assignments only")
+		if len(assignment.lhs) != 1 || len(assignment.rhs) != 1 {
+			fail(node_location(&scope, statement), "assign one value at a time")
+		}
+		for name in gather_names(assignment.lhs[0]) do mark_slot(procedure, &scope, name, false)
+		for name in gather_names(assignment.rhs[0]) do mark_slot(procedure, &scope, name, true)
+		target := root_name(assignment.lhs[0])
+		mark_slot(procedure, &scope, target, assignment.op.text != "=", true)
+	}
+
+	for &slot in procedure.slots {
+		switch found in program.names[slot.name] {
+		case ^Type:
+			complete_type(program, found)
+			slot.type = found
+		case ^Field:
+			slot.type = found.type
+		case ^Definition, ^Procedure, nil:
+			fail(location, "slot %s must be labeled with a type or a state name", slot.name)
+		}
+		switch {
+		case slot.written:
+			if procedure.output != nil do fail(location, "%s writes two slots: %s and %s", procedure.name, procedure.output.name, slot.name)
+			procedure.output = &slot
+		case slot.read:
+			if procedure.input != nil do fail(location, "%s reads two slots: %s and %s", procedure.name, procedure.input.name, slot.name)
+			procedure.input = &slot
+		}
+	}
+	if len(procedure.slots) == 0 do fail(location, "%s has no slot, mark one with $", procedure.name)
+
+	for statement in procedure.parsed.statements {
+		check_assignment(program, &scope, statement.derived.(^ast.Assign_Stmt))
+	}
+	procedure.touches_state = scope.touches_state
+}
+
+// Adds a slot for a `$` name, and records how slot names are used.
+mark_slot :: proc(procedure: ^Procedure, scope: ^Scope, name: ^ast.Ident, read: bool, written := false) {
+	if name == nil do return
+	slot := find_slot(procedure, name.name)
+	if slot == nil {
+		if !scope.parsed.slot_offsets[name.pos.offset] do return
+		append(&procedure.slots, Slot{name = name.name})
+		slot = &procedure.slots[len(procedure.slots) - 1]
+	}
+	slot.read ||= read
+	slot.written ||= written
+}
+
+find_slot :: proc(procedure: ^Procedure, name: string) -> ^Slot {
+	if procedure == nil do return nil
+	for &slot in procedure.slots {
+		if slot.name == name do return &slot
+	}
+	return nil
+}
+
+// Every name read by an expression, not counting field names after a dot.
+gather_names :: proc(expression: ^ast.Expr) -> [dynamic]^ast.Ident {
+	names: [dynamic]^ast.Ident
+	gather :: proc(expression: ^ast.Expr, names: ^[dynamic]^ast.Ident) {
+		if expression == nil do return
+		#partial switch node in expression.derived {
+		case ^ast.Ident:
+			append(names, node)
+		case ^ast.Selector_Expr:
+			gather(node.expr, names)
+		case ^ast.Paren_Expr:
+			gather(node.expr, names)
+		case ^ast.Unary_Expr:
+			gather(node.expr, names)
+		case ^ast.Binary_Expr:
+			gather(node.left, names)
+			gather(node.right, names)
+		case ^ast.Comp_Lit:
+			for element in node.elems do gather(element, names)
+		case ^ast.Field_Value:
+			gather(node.value, names)
+		}
+	}
+	gather(expression, &names)
+	return names
+}
+
+// The name an assignment target hangs off: `a` in `a.b.c`.
+root_name :: proc(expression: ^ast.Expr) -> ^ast.Ident {
+	#partial switch node in expression.derived {
+	case ^ast.Ident:
+		return node
+	case ^ast.Selector_Expr:
+		return root_name(node.expr)
+	}
+	return nil
+}
+
+check_assignment :: proc(program: ^Program, scope: ^Scope, assignment: ^ast.Assign_Stmt) {
+	target := assignment.lhs[0]
+	location := node_location(scope, target)
+	root := root_name(target)
+	if root == nil do fail(location, "can only assign to a slot or state")
+	_, is_field := program.names[root.name].(^Field)
+	if find_slot(scope.procedure, root.name) == nil && !is_field {
+		fail(location, "can only assign to a slot or state, %s is neither", root.name)
+	}
+
+	target_type := type_of(program, scope, target)
+	value_type := type_of(program, scope, assignment.rhs[0])
+	if assignment.op.text != "=" {
+		value_type = arithmetic_type(target_type, value_type, location)
+	}
+	if !accepts(target_type, value_type) {
+		fail(location, "cannot assign %s to %s", value_type.name, target_type.name)
+	}
+}
+
+check_line :: proc(program: ^Program, line: ^Line) {
+	parts := line.parts[:]
+	if len(parts) < 2 || parts[0].kind != .Data || parts[len(parts) - 1].kind != .Data {
+		fail(line.location, "a line needs data on both ends")
+	}
+	scope := Scope{parsed = &parts[0].parsed}
+	flow := default_type(type_of(program, &scope, parts[0].expression))
+
+	for &part, index in parts[1:] {
+		scope = Scope{parsed = &part.parsed, flow_type = flow}
+		switch part.kind {
+		case .Gate:
+			if gate_type := type_of(program, &scope, part.expression); gate_type.kind != .Boolean {
+				fail(line.location, "a gate needs a bool, got %s", gate_type.name)
+			}
+		case .Data:
+			check_target(program, &scope, part.expression, line.location)
+			if target_type := type_of(program, &scope, part.expression); target_type != flow {
+				fail(line.location, "cannot write %s to %s", flow.name, target_type.name)
+			}
+		case .Procedure:
+			procedure := find_procedure(program, part.name, line.location)
+			fed := procedure.input if procedure.input != nil else procedure.output
+			if fed.type != flow {
+				fail(line.location, "%s takes %s, got %s", part.name, fed.type.name, flow.name)
+			}
+			if procedure.output == nil do continue
+			if destination := destination_of(parts[1:][index + 1:]); destination != nil {
+				destination_scope := Scope{parsed = &destination.parsed}
+				if type_of(program, &destination_scope, destination.expression) != procedure.output.type {
+					fail(line.location, "%s gives %s, which does not fit its destination", part.name, procedure.output.type.name)
+				}
+			}
+			flow = procedure.output.type
+		}
+	}
+}
+
+find_procedure :: proc(program: ^Program, name: string, location: Location) -> ^Procedure {
+	procedure, ok := program.names[name].(^Procedure)
+	if !ok do fail(location, "%s is not a proc", name)
+	return procedure
+}
+
+// The data a proc's output lands in: the next data part, past any gates.
+destination_of :: proc(rest: []Part) -> ^Part {
+	for &part in rest {
+		switch part.kind {
+		case .Gate:
+			continue
+		case .Data:
+			return &part
+		case .Procedure:
+			return nil
+		}
+	}
+	return nil
+}
+
+check_target :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr, location: Location) {
+	root := root_name(expression)
+	if root == nil do fail(location, "cannot write to this")
+	if _, is_field := program.names[root.name].(^Field); !is_field {
+		fail(location, "can only write to state, %s is not stored data", root.name)
+	}
+}
+
+default_type :: proc(type: ^Type) -> ^Type {
+	if type == untyped_integer do return builtin_type("int")
+	if type == untyped_float do return builtin_type("float")
+	return type
+}
+
+
+// Whether a value of type `source` can be stored in `target`.
+accepts :: proc(target, source: ^Type) -> bool {
+	if target == source do return true
+	if !source.untyped do return false
+	#partial switch target.kind {
+	case .Float:
+		return true
+	case .Integer:
+		return source == untyped_integer
+	case .Array:
+		return accepts(target.element, source)
+	}
+	return false
+}
+
+unify :: proc(left, right: ^Type, location: Location) -> ^Type {
+	switch {
+	case left == right:
+		return left
+	case left.untyped && right.untyped:
+		return untyped_float
+	case left.untyped && accepts(right, left):
+		return right
+	case right.untyped && accepts(left, right):
+		return left
+	}
+	fail(location, "type mismatch: %s and %s", left.name, right.name)
+}
+
+is_numeric :: proc(type: ^Type) -> bool {
+	#partial switch type.kind {
+	case .Integer, .Float:
+		return true
+	case .Array:
+		return is_numeric(type.element)
+	}
+	return false
+}
+
+// `+ - * /`: element-wise on arrays, and a scalar spreads over an array.
+arithmetic_type :: proc(left, right: ^Type, location: Location) -> ^Type {
+	result: ^Type
+	switch {
+	case left.kind == .Array && right.kind != .Array:
+		if !accepts(left.element, right) do fail(location, "type mismatch: %s and %s", left.name, right.name)
+		result = left
+	case right.kind == .Array && left.kind != .Array:
+		if !accepts(right.element, left) do fail(location, "type mismatch: %s and %s", left.name, right.name)
+		result = right
+	case:
+		result = unify(left, right, location)
+	}
+	if !is_numeric(result) do fail(location, "arithmetic needs numbers, got %s", result.name)
+	return result
+}
+
+ELEMENT_NAMES :: [?]string{"xyzw", "rgba"}
+
+element_index :: proc(type: ^Type, name: string) -> int {
+	if len(name) != 1 do return -1
+	for names in ELEMENT_NAMES {
+		index := strings.index_byte(names, name[0])
+		if index >= 0 && index < type.count do return index
+	}
+	return -1
+}
+
+enum_named :: proc(program: ^Program, expression: ^ast.Expr) -> ^Type {
+	name, is_name := expression.derived.(^ast.Ident)
+	if !is_name do return nil
+	type, is_type := program.names[name.name].(^Type)
+	return type if is_type && type.kind == .Enum else nil
+}
+
+type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Type {
+	location := node_location(scope, expression)
+	#partial switch node in expression.derived {
+	case ^ast.Basic_Lit:
+		#partial switch node.tok.kind {
+		case .Integer:
+			return untyped_integer
+		case .Float:
+			return untyped_float
+		}
+	case ^ast.Ident:
+		return type_of_name(program, scope, node.name, location)
+	case ^ast.Paren_Expr:
+		return type_of(program, scope, node.expr)
+	case ^ast.Selector_Expr:
+		if enum_type := enum_named(program, node.expr); enum_type != nil {
+			for name in enum_type.cases {
+				if name == node.field.name do return enum_type
+			}
+			fail(location, "%s has no case %s", enum_type.name, node.field.name)
+		}
+		base := type_of(program, scope, node.expr)
+		#partial switch base.kind {
+		case .Struct:
+			for field in base.fields {
+				if field.name == node.field.name do return field.type
+			}
+		case .Array:
+			if element_index(base, node.field.name) >= 0 do return base.element
+		}
+		fail(location, "%s has no field %s", base.name, node.field.name)
+	case ^ast.Unary_Expr:
+		operand := type_of(program, scope, node.expr)
+		switch node.op.text {
+		case "-", "+":
+			if !is_numeric(operand) do fail(location, "%s needs a number", node.op.text)
+			return operand
+		case "!":
+			if operand.kind != .Boolean do fail(location, "not needs a bool")
+			return operand
+		}
+	case ^ast.Binary_Expr:
+		left := type_of(program, scope, node.left)
+		right := type_of(program, scope, node.right)
+		switch node.op.text {
+		case "&&", "||":
+			if left.kind != .Boolean || right.kind != .Boolean do fail(location, "%s needs bools", node.op.text)
+			return left
+		case "==", "!=":
+			if unify(left, right, location).kind == .Struct do fail(location, "structs cannot be compared")
+			return builtin_type("bool")
+		case "<", ">", "<=", ">=":
+			if unified := unify(left, right, location); unified.kind != .Integer && unified.kind != .Float {
+				fail(location, "%s needs numbers", node.op.text)
+			}
+			return builtin_type("bool")
+		case "+", "-", "*", "/":
+			return arithmetic_type(left, right, location)
+		case "%", "&", "|", "~", "<<", ">>":
+			if unified := unify(left, right, location); unified.kind == .Integer do return unified
+			fail(location, "%s needs integers", node.op.text)
+		}
+	case ^ast.Comp_Lit:
+		if node.type == nil do fail(location, "name the type: Vector{1, 2, 3}")
+		type := resolve_type(program, scope, node.type)
+		#partial switch type.kind {
+		case .Array:
+			if len(node.elems) != type.count do fail(location, "%s takes %d values", type.name, type.count)
+			for element in node.elems {
+				if !accepts(type.element, type_of(program, scope, element)) do fail(location, "%s holds %s", type.name, type.element.name)
+			}
+		case .Struct:
+			for element in node.elems {
+				field_value, ok := element.derived.(^ast.Field_Value)
+				if !ok do fail(location, "name each field: %s{health = 1}", type.name)
+				field := struct_field(type, field_value.field.derived.(^ast.Ident).name, location)
+				if !accepts(field.type, type_of(program, scope, field_value.value)) do fail(location, "%s.%s is %s", type.name, field.name, field.type.name)
+			}
+		case:
+			fail(location, "%s cannot be built with {}", type.name)
+		}
+		return type
+	}
+	fail(location, "not allowed in eloq: %v", reflect.union_variant_typeid(expression.derived))
+}
+
+struct_field :: proc(type: ^Type, name: string, location: Location) -> ^Field {
+	for field in type.fields {
+		if field.name == name do return field
+	}
+	fail(location, "%s has no field %s", type.name, name)
+}
+
+type_of_name :: proc(program: ^Program, scope: ^Scope, name: string, location: Location) -> ^Type {
+	if name == FLOW_NAME && scope.flow_type != nil do return scope.flow_type
+	if name == "true" || name == "false" do return builtin_type("bool")
+	if slot := find_slot(scope.procedure, name); slot != nil do return slot.type
+	switch found in program.names[name] {
+	case ^Field:
+		scope.touches_state = true
+		return found.type
+	case ^Definition:
+		check_definition(program, found)
+		if !found.constant do scope.touches_state = true
+		return found.type
+	case ^Type, ^Procedure:
+		fail(location, "%s is not a value", name)
+	case nil:
+	}
+	fail(location, "unknown name %s", name)
+}

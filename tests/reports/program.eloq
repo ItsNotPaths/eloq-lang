@@ -1,0 +1,23 @@
+enemies :: table 4
+	health : float
+
+missiles :: table 4
+	target : int
+	damage : float
+
+state reports
+	count  := 3
+	ratio  := 0.0
+	whole  := 0
+	wide   : double
+
+hit ::
+	enemies[$missiles.target].health = enemies[missiles.target].health - missiles.damage
+
+copy_float ::
+	$float = float
+
+count    |copy_float| ratio
+ratio    |copy_float| whole
+ratio    |copy_float| wide
+missiles |hit|        missiles

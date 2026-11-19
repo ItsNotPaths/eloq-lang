@@ -1,0 +1,5 @@
+tests/reports/program.eloq:20: widening int to float
+tests/reports/program.eloq:21: narrowing float to int
+tests/reports/program.eloq:22: widening float to double
+tests/reports/program.eloq:20: reads count; writes ratio
+tests/reports/program.eloq:23: writes enemies.health by index in a loop over missiles; the result can depend on row order

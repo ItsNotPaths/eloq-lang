@@ -49,6 +49,7 @@ Access :: struct {
 	writes:       map[string]bool,
 	value_reads:  map[string]bool, // on-demand values and value matches, by name
 	direct_reads: map[string]bool, // reads made here or by called procs, not through a value
+	index_writes: map[string]bool, // columns written by index: `enemies[target].health`
 	indexes:      bool, // some index can be out of range: an abcont
 }
 

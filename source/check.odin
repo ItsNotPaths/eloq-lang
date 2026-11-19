@@ -39,6 +39,7 @@ merge_access :: proc(into: ^Access, from: Access) {
 	for name in from.writes do into.writes[name] = true
 	for name in from.value_reads do into.value_reads[name] = true
 	for name in from.direct_reads do into.direct_reads[name] = true
+	for name in from.index_writes do into.index_writes[name] = true
 	into.indexes ||= from.indexes
 }
 
@@ -58,11 +59,27 @@ target_name :: proc(program: ^Program, expression: ^ast.Expr) -> string {
 
 note_write :: proc(program: ^Program, access: ^Access, expression: ^ast.Expr) {
 	if access == nil do return
+	by_index := written_by_index(program, expression)
 	if table := table_named(program, without_index(expression)); table != nil {
-		for column in table.fields do access.writes[column_name(table, column.name)] = true
+		for column in table.fields {
+			access.writes[column_name(table, column.name)] = true
+			if by_index do access.index_writes[column_name(table, column.name)] = true
+		}
 		return
 	}
 	access.writes[target_name(program, expression)] = true
+	if by_index do access.index_writes[target_name(program, expression)] = true
+}
+
+// `enemies[target].health`: a row picked by index, not the current one.
+written_by_index :: proc(program: ^Program, expression: ^ast.Expr) -> bool {
+	#partial switch node in expression.derived {
+	case ^ast.Index_Expr:
+		return table_named(program, node.expr) != nil || written_by_index(program, node.expr)
+	case ^ast.Selector_Expr:
+		return written_by_index(program, node.expr)
+	}
+	return false
 }
 
 // `enemies` in `enemies[target]`.
@@ -212,7 +229,7 @@ check_field :: proc(program: ^Program, field: ^Field) {
 	if scope.touches_state do fail(field.location, "the starting value of %s must be constant", field.name)
 	if field.type == nil {
 		field.type = default_type(initial_type)
-	} else if !accepts(field.type, initial_type) {
+	} else if !fits(field.type, initial_type, field.location) {
 		fail(field.location, "%s is %s, its starting value is %s", field.name, field.type.name, initial_type.name)
 	}
 }
@@ -518,7 +535,7 @@ check_assignment :: proc(program: ^Program, scope: ^Scope, assignment: ^ast.Assi
 	if assignment.op.text != "=" {
 		value_type = arithmetic_type(target_type, value_type, location)
 	}
-	if !accepts(target_type, value_type) {
+	if !fits(target_type, value_type, location) {
 		fail(location, "cannot assign %s to %s", value_type.name, target_type.name)
 	}
 }
@@ -607,8 +624,10 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 				if flow != table.row do fail(location, "a row of %s is %s, got %s", table.name, table.row.name, flow.name)
 				continue
 			}
-			check_target(program, &scope, part.expression, location)
-			if target_type := type_of(program, &scope, part.expression); !accepts(target_type, flow) {
+			target_scope := scope
+			target_scope.access = nil // a destination is written; it is read only when a proc starts from it
+			check_target(program, &target_scope, part.expression, location)
+			if target_type := type_of(program, &target_scope, part.expression); !fits(target_type, flow, location) {
 				fail(location, "cannot write %s to %s", flow.name, target_type.name)
 			}
 		case .Procedure:
@@ -628,6 +647,10 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 				procedure := resolve_procedure(program, found, flow, location)
 				flow = check_call(program, procedure, flow, destination, row_table, location)
 				merge_access(access, procedure.access)
+				if procedure.input != nil && procedure.output != nil && destination != nil && !destination.appends {
+					destination_scope := Scope{parsed = &destination.parsed, row_table = row_table, access = access}
+					type_of(program, &destination_scope, destination.expression)
+				}
 			case ^Match:
 				if !found.has_pipes do fail(location, "%s is a value, not a proc", part.name)
 				check_match(program, found)
@@ -651,10 +674,10 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 
 check_call :: proc(program: ^Program, procedure: ^Procedure, flow: ^Type, destination: ^Part, row_table: ^Type, location: Location) -> ^Type {
 	fed := fed_slot(procedure)
-	if !accepts(fed.type, flow) do fail(location, "%s takes %s, got %s", procedure.name, fed.type.name, flow.name)
+	if !fits(fed.type, flow, location) do fail(location, "%s takes %s, got %s", procedure.name, fed.type.name, flow.name)
 	if procedure.output == nil do return flow
 	if destination != nil {
-		if !accepts(destination_type(program, destination, row_table), procedure.output.type) {
+		if !fits(destination_type(program, destination, row_table), procedure.output.type, location) {
 			fail(location, "%s gives %s, which does not fit its destination", procedure.name, procedure.output.type.name)
 		}
 	}
@@ -919,14 +942,14 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 		case .Array:
 			if len(node.elems) != type.count do fail(location, "%s takes %d values", type.name, type.count)
 			for element in node.elems {
-				if !accepts(type.element, type_of(program, scope, element)) do fail(location, "%s holds %s", type.name, type.element.name)
+				if !fits(type.element, type_of(program, scope, element), location) do fail(location, "%s holds %s", type.name, type.element.name)
 			}
 		case .Struct:
 			for element in node.elems {
 				field_value, ok := element.derived.(^ast.Field_Value)
 				if !ok do fail(location, "name each field: %s{health = 1}", type.name)
 				field := struct_field(type, field_value.field.derived.(^ast.Ident).name, location)
-				if !accepts(field.type, type_of(program, scope, field_value.value)) do fail(location, "%s.%s is %s", type.name, field.name, field.type.name)
+				if !fits(field.type, type_of(program, scope, field_value.value), location) do fail(location, "%s.%s is %s", type.name, field.name, field.type.name)
 			}
 		case:
 			fail(location, "%s cannot be built with {}", type.name)

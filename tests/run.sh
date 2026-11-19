@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Each tests/<case>/ holds program.eloq and either host.c, which runs the step and
-# asserts on the state, or expect-error, text that eloqc's error must contain.
+# Each tests/<case>/ holds program.eloq and one of: host.c, which runs the step and
+# asserts on the state; expect-error, text that eloqc's error must contain; or
+# expect-output, lines that eloqc's stdout must hold.
 # An optional flags file holds extra eloqc arguments.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -24,6 +25,16 @@ for case in tests/*/; do
 		continue
 	fi
 	flags=$(cat "$case/flags" 2>/dev/null)
+	if [[ -f $case/expect-output ]]; then
+		./eloqc $flags "$case/program.eloq" -out:"$work/$name/program" >"$work/$name/output" || { echo "FAIL $name"; failed=1; continue; }
+		missing=$(grep -vxF -f "$work/$name/output" "$case/expect-output")
+		if [[ -n $missing ]]; then
+			echo "FAIL $name: missing: $missing"; failed=1
+		else
+			echo "ok   $name"
+		fi
+		continue
+	fi
 	if ./eloqc $flags "$case/program.eloq" -out:"$work/$name/program" \
 		&& ${CC:-cc} -std=c11 -pedantic -Wall -Wextra -Werror -I"$work/$name" "$case/host.c" "$work/$name/program.c" -lm -o "$work/$name/run" \
 		&& "$work/$name/run"; then

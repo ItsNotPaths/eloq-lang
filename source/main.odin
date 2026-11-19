@@ -6,7 +6,6 @@ import "core:strings"
 
 main :: proc() {
 	input_path, output_path: string
-	// (hole report-flag :tags tooling) no report flags (--coercions, --access, --index-order); --report turns on all.
 	// (hole formatter :tags tooling) no --format: tabs, one opener (the more used of ? and ¿), --upside-down for ¿.
 	for argument in os.args[1:] {
 		switch {
@@ -14,6 +13,16 @@ main :: proc() {
 			output_path = argument[len("-out:"):]
 		case argument == "--recompute-every-read":
 			recompute_every_read = true
+		case argument == "--coercions":
+			reports.coercions = true
+		case argument == "--access":
+			reports.access = true
+		case argument == "--index-order":
+			reports.index_order = true
+		case argument == "--log-intermediates":
+			reports.log_intermediates = true
+		case argument == "--report":
+			reports = {true, true, true, true}
 		case:
 			input_path = argument
 		}
@@ -30,6 +39,7 @@ main :: proc() {
 	items := group_items(lines[:])
 	program := build_program(items[:])
 	check_program(&program)
+	print_reports(&program)
 	header, source := emit_program(&program, base_name(output_path))
 	write_file(strings.concatenate({output_path, ".h"}), header)
 	write_file(strings.concatenate({output_path, ".c"}), source)

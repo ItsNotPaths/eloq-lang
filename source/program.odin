@@ -46,6 +46,7 @@ Access :: struct {
 	reads:       map[string]bool,
 	writes:      map[string]bool,
 	value_reads: map[string]bool, // on-demand values and value matches, by name
+	indexes:     bool, // some index can be out of range: an abcont
 }
 
 Check_Status :: enum {

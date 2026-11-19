@@ -1,0 +1,33 @@
+Vector :: [3]float
+
+enemies :: table 4
+	position : Vector
+	health   : float
+
+missiles :: table 4
+	target : int
+	damage : float
+
+state indexes
+	target       := 0
+	aim          := Vector{0, 0, 0}
+	first_health := 0.0
+	slots        := Vector{1, 2, 3}
+	slot         := 0
+	picked       := 0.0
+
+first_enemy_health :: enemies[0].health
+
+hit ::
+	enemies[$missiles.target].health = enemies[missiles.target].health - missiles.damage
+
+copy_vector ::
+	$Vector = Vector
+
+copy_float ::
+	$float = float
+
+enemies[target].position |copy_vector| aim
+missiles                 |hit|         missiles
+first_enemy_health       |copy_float|  first_health
+slots[slot]              |copy_float|  picked

@@ -33,20 +33,24 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	source_builder := strings.builder_make()
 	out = &source_builder
 	fmt.sbprintf(out, "#include <math.h>\n#include <string.h>\n#include \"%s.h\"\n\n", header_name)
+	tables := state_tables(program)
+	emit_abend_procs(out, tables, abend_type, state_type)
 	values := on_demand_values(program)
 	value_matches: [dynamic]^Match
 	for match in program.matches {
 		if !match.has_pipes do append(&value_matches, match)
 	}
-	for definition in values do fmt.sbprintf(out, "%s;\n", value_signature(definition.name, definition.type, definition.row_table, state_type))
-	for match in value_matches do fmt.sbprintf(out, "%s;\n", value_signature(match.name, match.type, match.row_table, state_type))
+	for definition in values do fmt.sbprintf(out, "%s;\n", value_signature(definition.name, definition.type, definition.row_table, definition.access.indexes, state_type))
+	for match in value_matches do fmt.sbprintf(out, "%s;\n", value_signature(match.name, match.type, match.row_table, match.access.indexes, state_type))
 	for procedure in program.procedures {
 		signature := foreign_signature(procedure) if procedure.foreign_name != "" else procedure_signature(program, procedure, state_type)
 		fmt.sbprintf(out, "%s;\n", signature)
 	}
 	for definition in values {
 		scope := Scope{parsed = &definition.parsed, row_table = definition.row_table}
-		fmt.sbprintf(out, "\n%s {{\n\treturn ", value_signature(definition.name, definition.type, definition.row_table, state_type))
+		fmt.sbprintf(out, "\n%s {{\n", value_signature(definition.name, definition.type, definition.row_table, definition.access.indexes, state_type))
+		emit_index_checks(program, &scope, out, "\t", {definition.expression}, table_row(definition.row_table), zero_return(definition.type))
+		fmt.sbprintf(out, "\treturn ")
 		emit_expression(program, &scope, out, definition.expression, definition.type)
 		fmt.sbprintf(out, ";\n}}\n")
 	}
@@ -64,8 +68,6 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 		fmt.sbprintf(out, ";\n")
 	}
 	fmt.sbprintf(out, "}}\n\n")
-	tables := state_tables(program)
-	emit_abend_procs(out, tables, abend_type, state_type)
 	fmt.sbprintf(out, "int %s(%s *state) {{\n\tstate->abends.count = 0;\n\tstate->abends.dropped = 0;\n", program.state_name, state_type)
 	for field in program.fields {
 		emit_state_checks(out, field.type, fmt.aprintf("state->%s", field.name), upper_name, field.location.line, "-1", 1)
@@ -115,7 +117,7 @@ emit_type :: proc(out: Output, type: ^Type, emitted: ^map[^Type]bool) {
 	}
 }
 
-CODES :: [?]string{"ABEND_BAD_CASE", "ABEND_BAD_COUNT", "ABCONT_TABLE_FULL"}
+CODES :: [?]string{"ABEND_BAD_CASE", "ABEND_BAD_COUNT", "ABCONT_TABLE_FULL", "ABCONT_BAD_INDEX"}
 ABEND_CAPACITY :: 16
 
 // Codes land in state->abends in the order they happen. A stop drops pending removes.
@@ -198,9 +200,117 @@ on_demand_values :: proc(program: ^Program) -> [dynamic]^Definition {
 	return values
 }
 
-value_signature :: proc(name: string, type: ^Type, row_table: ^Type, state_type: string) -> string {
+// A value that indexes can record an abcont, so it takes state as writable.
+value_signature :: proc(name: string, type: ^Type, row_table: ^Type, indexes: bool, state_type: string) -> string {
 	row := ", int row" if row_table != nil else ""
-	return fmt.aprintf("static inline %s value_%s(const %s *state%s)", c_type_name(type), name, state_type, row)
+	return fmt.aprintf("static inline %s value_%s(%s%s *state%s)", c_type_name(type), name, "" if indexes else "const ", state_type, row)
+}
+
+table_row :: proc(row_table: ^Type) -> string {
+	return "row" if row_table != nil else "-1"
+}
+
+zero_return :: proc(type: ^Type) -> string {
+	return fmt.aprintf("return (%s){{0}};", c_type_name(type))
+}
+
+Index_Check :: struct {
+	index: string,
+	bound: string,
+	line:  int,
+}
+
+// One bounds check per index, before the statement that holds it, so a bad index
+// records one abcont rather than one per element. Returns whether it wrote any.
+emit_index_checks :: proc(program: ^Program, scope: ^Scope, out: Output, indent: string, expressions: []^ast.Expr, row, on_fail: string) -> bool {
+	checks: [dynamic]Index_Check
+	for expression in expressions do gather_index_checks(program, scope, expression, &checks)
+	emitted: map[string]bool
+	for check in checks {
+		key := strings.concatenate({check.index, " < ", check.bound})
+		if emitted[key] do continue
+		emitted[key] = true
+		call := abend_call("record_abend", strings.to_upper(program.state_name), "ABCONT_BAD_INDEX", check.line, row, fmt.aprintf("(int)(%s)", check.index))
+		fmt.sbprintf(out, "%sif ((unsigned)(%s) >= (unsigned)(%s)) {{\n%s\t%s;\n%s\t%s\n%s}}\n", indent, check.index, check.bound, indent, call, indent, on_fail, indent)
+	}
+	return len(checks) > 0
+}
+
+// Inner indexes first: `a[b[i]]` checks `i` before `b[i]`.
+gather_index_checks :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr, checks: ^[dynamic]Index_Check) {
+	if expression == nil do return
+	#partial switch node in expression.derived {
+	case ^ast.Index_Expr:
+		gather_index_checks(program, scope, node.expr, checks)
+		gather_index_checks(program, scope, node.index, checks)
+		bound: string
+		if is_table_index(program, scope, node) {
+			bound = fmt.aprintf("state->%s.count", table_named(program, node.expr).name)
+		} else if _, is_literal := node.index.derived.(^ast.Basic_Lit); is_literal {
+			return
+		} else {
+			bound = fmt.aprintf("%d", type_of(program, scope, node.expr).count)
+		}
+		append(checks, Index_Check{index_text(program, scope, node.index), bound, node_location(scope, expression).line})
+	case ^ast.Selector_Expr:
+		gather_index_checks(program, scope, node.expr, checks)
+	case ^ast.Paren_Expr:
+		gather_index_checks(program, scope, node.expr, checks)
+	case ^ast.Unary_Expr:
+		gather_index_checks(program, scope, node.expr, checks)
+	case ^ast.Binary_Expr:
+		gather_index_checks(program, scope, node.left, checks)
+		gather_index_checks(program, scope, node.right, checks)
+	case ^ast.Comp_Lit:
+		for element in node.elems do gather_index_checks(program, scope, element, checks)
+	case ^ast.Field_Value:
+		gather_index_checks(program, scope, node.value, checks)
+	case ^ast.Call_Expr:
+		for argument in node.args do gather_index_checks(program, scope, argument, checks)
+	}
+}
+
+// A part whose proc or values can record an abcont inside the call, which the line
+// then sees by the code count.
+part_calls_index :: proc(program: ^Program, part: ^Part) -> bool {
+	if part.kind == .Procedure {
+		#partial switch found in program.names[part.name] {
+		case ^Procedure:
+			return found.access.indexes
+		case ^Match:
+			if reads_index_value(program, found.subject) do return true
+			for &arm in found.arms {
+				for &arm_part in arm.parts {
+					if part_calls_index(program, &arm_part) do return true
+				}
+			}
+		}
+		return false
+	}
+	return reads_index_value(program, part.expression)
+}
+
+reads_index_value :: proc(program: ^Program, expression: ^ast.Expr) -> bool {
+	for name in gather_names(expression) {
+		#partial switch found in program.names[name.name] {
+		case ^Definition:
+			if found.access.indexes do return true
+		case ^Match:
+			if !found.has_pipes && found.access.indexes do return true
+		}
+	}
+	return false
+}
+
+is_table_index :: proc(program: ^Program, scope: ^Scope, indexed: ^ast.Index_Expr) -> bool {
+	table := table_named(program, indexed.expr)
+	return table != nil && find_slot(scope.procedure, table.name) == nil
+}
+
+index_text :: proc(program: ^Program, scope: ^Scope, index: ^ast.Expr) -> string {
+	builder := strings.builder_make()
+	emit_expression(program, scope, &builder, index, builtin_type("int"))
+	return strings.to_string(builder)
 }
 
 // A struct or array input is spread into one argument per field.
@@ -274,7 +384,7 @@ cached_values :: proc(program: ^Program, access: Access) -> map[string]bool {
 	if recompute_every_read do return cached
 	for name in access.value_reads {
 		value, _, ok := step_value(program, name)
-		if ok && !overlaps(value.reads, access.writes) do cached[name] = true
+		if ok && !value.indexes && !overlaps(value.reads, access.writes) do cached[name] = true
 	}
 	return cached
 }
@@ -318,9 +428,11 @@ emit_procedure :: proc(program: ^Program, output: Output, procedure: ^Procedure,
 	scope := Scope{parsed = &procedure.parsed, procedure = procedure, cached = &cached}
 	body_builder := strings.builder_make()
 	out := &body_builder
+	on_fail := fmt.aprintf("return slot_%s;", procedure.output.name) if procedure.output != nil else "return;"
 	for statement in procedure.parsed.statements {
 		assignment := statement.derived.(^ast.Assign_Stmt)
 		target := assignment.lhs[0]
+		emit_index_checks(program, &scope, out, "\t", {target, assignment.rhs[0]}, "-1", on_fail)
 		target_type := type_of(program, &scope, target)
 		if target_type.kind == .Array && assignment.op.text != "=" {
 			for element in 0 ..< target_type.count {
@@ -364,7 +476,7 @@ Line_Emitter :: struct {
 // (hole parallel-lines :tags codegen) lines with disjoint write sets still run one after another.
 emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string, cached: ^map[string]bool) {
 	parts := line.parts[:]
-	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
+	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line,  indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
 
 	fmt.sbprintf(out, "\t{{ // %s:%d\n", line.location.path, line.location.line)
 	outer_indent := emitter.indent
@@ -377,11 +489,19 @@ emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper
 		fmt.sbprintf(out, "%sfor (int pass = 0; pass < %d; pass += 1) {{\n", emitter.indent, line.repeat_count)
 		emitter.indent = strings.concatenate({emitter.indent, "\t"})
 	}
+	for &part in parts {
+		if part_calls_index(program, &part) {
+			fmt.sbprintf(out, "%sint codes_before = state->abends.count + state->abends.dropped;\n", emitter.indent)
+			break
+		}
+	}
 	scope := Scope{parsed = &parts[0].parsed, row_table = line.row_table, cached = cached}
 	flow := default_type(type_of(program, &scope, parts[0].expression))
+	emitter.has_line_end ||= emit_index_checks(program, &scope, out, emitter.indent, {parts[0].expression}, emitter_row(&emitter), line_skip(&emitter))
 	fmt.sbprintf(out, "%s%s flow_1 = ", emitter.indent, c_type_name(flow))
 	emit_expression(program, &scope, out, parts[0].expression, flow)
 	fmt.sbprintf(out, ";\n")
+	emit_codes_check(&emitter, &parts[0])
 	emit_parts(&emitter, parts[1:], flow, "flow_1", nil)
 
 	if line.repeat_count > 0 do fmt.sbprintf(out, "%s}}\n", loop_indent)
@@ -396,6 +516,10 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 	flow, flow_variable := flow, flow_variable
 	for &part, index in parts {
 		scope := Scope{parsed = &part.parsed, flow_type = flow, flow_variable = flow_variable, row_table = emitter.row_table, cached = emitter.cached}
+		defer emit_codes_check(emitter, &part)
+		if part.kind != .Procedure {
+			emitter.has_line_end ||= emit_index_checks(program, &scope, out, indent, {part.expression}, emitter_row(emitter), line_skip(emitter))
+		}
 		switch part.kind {
 		case .Gate:
 			fmt.sbprintf(out, "%sif (!(", indent)
@@ -442,6 +566,8 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 				output := check_parts(program, found.arms[0].parts[:], flow, destination, emitter.row_table, nil, found.location)
 				result := next_flow(emitter)
 				fmt.sbprintf(out, "%s%s %s;\n", indent, c_type_name(output), result)
+				subject_scope := Scope{parsed = &found.parsed, row_table = emitter.row_table, cached = emitter.cached}
+				emitter.has_line_end ||= emit_index_checks(program, &subject_scope, out, indent, {found.subject}, emitter_row(emitter), line_skip(emitter))
 				emit_switch_open(emitter.program, out, found, indent, emitter.cached)
 				emitter.indent = strings.concatenate({indent, "\t"})
 				for &arm, arm_index in found.arms {
@@ -461,10 +587,24 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 // An abcont skips the rest of the line for this row, or stops the step if the host asks.
 emit_abcont :: proc(emitter: ^Line_Emitter, condition, abcont, value: string) {
 	call := abend_call("record_abend", emitter.upper_name, strings.concatenate({"ABCONT_", abcont}), emitter.source_line, emitter_row(emitter), value)
-	fmt.sbprintf(emitter.out, "%sif (%s) {{\n%s\t%s;\n", emitter.indent, condition, emitter.indent, call)
-	fmt.sbprintf(emitter.out, "%s\tif (state->abends.stop_on_abcont) return stop_step(state);\n", emitter.indent)
-	fmt.sbprintf(emitter.out, "%s\tgoto line_%d_end;\n%s}}\n", emitter.indent, emitter.number, emitter.indent)
+	fmt.sbprintf(emitter.out, "%sif (%s) {{\n%s\t%s;\n%s\t%s\n%s}}\n", emitter.indent, condition, emitter.indent, call, emitter.indent, line_skip(emitter), emitter.indent)
 	emitter.has_line_end = true
+}
+
+// A proc or value that indexes records its own abcont; the line then skips the row.
+emit_codes_check :: proc(emitter: ^Line_Emitter, part: ^Part) {
+	if !part_calls_index(emitter.program, part) do return
+	emitter.has_line_end = true
+	out, indent := emitter.out, emitter.indent
+	fmt.sbprintf(out, "%sif (state->abends.count + state->abends.dropped != codes_before) {{\n", indent)
+	if emitter.row_table != nil {
+		fmt.sbprintf(out, "%s\tfor (int entry = codes_before; entry < state->abends.count; entry += 1) state->abends.entries[entry].row = row;\n", indent)
+	}
+	fmt.sbprintf(out, "%s\t%s\n%s}}\n", indent, line_skip(emitter), indent)
+}
+
+line_skip :: proc(emitter: ^Line_Emitter) -> string {
+	return fmt.aprintf("if (state->abends.stop_on_abcont) return stop_step(state); else goto line_%d_end;", emitter.number)
 }
 
 emitter_row :: proc(emitter: ^Line_Emitter) -> string {
@@ -527,14 +667,19 @@ case_labels :: proc(match: ^Match, arm_index: int) -> string {
 }
 
 emit_value_match :: proc(program: ^Program, out: Output, match: ^Match, state_type: string) {
-	fmt.sbprintf(out, "\n%s {{\n", value_signature(match.name, match.type, match.row_table, state_type))
+	fmt.sbprintf(out, "\n%s {{\n", value_signature(match.name, match.type, match.row_table, match.access.indexes, state_type))
 	if !match.touches_state do fmt.sbprintf(out, "\t(void)state;\n")
+	row, on_fail := table_row(match.row_table), zero_return(match.type)
+	subject_scope := Scope{parsed = &match.parsed, row_table = match.row_table}
+	emit_index_checks(program, &subject_scope, out, "\t", {match.subject}, row, on_fail)
 	emit_switch_open(program, out, match, "\t")
 	for &arm, index in match.arms {
 		scope := Scope{parsed = &arm.parsed, row_table = match.row_table}
-		fmt.sbprintf(out, "\t%s return ", case_labels(match, index))
+		fmt.sbprintf(out, "\t%s {{\n", case_labels(match, index))
+		emit_index_checks(program, &scope, out, "\t\t", {arm.value}, row, on_fail)
+		fmt.sbprintf(out, "\t\treturn ")
 		emit_expression(program, &scope, out, arm.value, match.type)
-		fmt.sbprintf(out, ";\n")
+		fmt.sbprintf(out, ";\n\t}}\n")
 	}
 	fmt.sbprintf(out, "\t}}\n}}\n")
 }
@@ -626,6 +771,11 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 			fmt.sbprintf(out, "%s", enum_constant(enum_type, node.field.name))
 			return
 		}
+		if indexed, ok := node.expr.derived.(^ast.Index_Expr); ok && is_table_index(program, scope, indexed) {
+			fmt.sbprintf(out, "state->%s.%s[%s]", table_named(program, indexed.expr).name, node.field.name, index_text(program, scope, indexed.index))
+			emit_element(out, type, element)
+			return
+		}
 		if table := table_named(program, node.expr); table != nil && find_slot(scope.procedure, table.name) == nil {
 			fmt.sbprintf(out, "state->%s.%s%s", table.name, node.field.name, "" if is_table_count(node.field.name) else "[row]")
 			emit_element(out, type, element)
@@ -638,6 +788,14 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 		} else {
 			fmt.sbprintf(out, ".%s", node.field.name)
 		}
+		emit_element(out, type, element)
+	case ^ast.Index_Expr:
+		if is_table_index(program, scope, node) {
+			fmt.sbprintf(out, "%s", row_literal(table_named(program, node.expr), index_text(program, scope, node.index)))
+			return
+		}
+		emit_expression(program, scope, out, node.expr, nil)
+		fmt.sbprintf(out, ".elements[%s]", index_text(program, scope, node.index))
 		emit_element(out, type, element)
 	case ^ast.Unary_Expr:
 		fmt.sbprintf(out, "%s", node.op.text)

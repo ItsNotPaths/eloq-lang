@@ -28,6 +28,7 @@ note_value_read :: proc(scope: ^Scope, name: string, value: Access) {
 	if scope.access == nil do return
 	scope.access.value_reads[name] = true
 	for read in value.reads do scope.access.reads[read] = true
+	scope.access.indexes ||= value.indexes
 }
 
 merge_access :: proc(into: ^Access, from: Access) {
@@ -35,19 +36,36 @@ merge_access :: proc(into: ^Access, from: Access) {
 	for name in from.reads do into.reads[name] = true
 	for name in from.writes do into.writes[name] = true
 	for name in from.value_reads do into.value_reads[name] = true
+	into.indexes ||= from.indexes
 }
 
 column_name :: proc(table: ^Type, column: string) -> string {
 	return strings.concatenate({table.name, ".", column})
 }
 
-// The state name a data part writes: a field, or "table.column".
+// The state name a write lands in: a field, or "table.column". A write by index
+// counts as writing the whole column.
 target_name :: proc(program: ^Program, expression: ^ast.Expr) -> string {
 	if selector, ok := expression.derived.(^ast.Selector_Expr); ok {
-		if table := table_named(program, selector.expr); table != nil do return column_name(table, selector.field.name)
+		if table := table_named(program, without_index(selector.expr)); table != nil do return column_name(table, selector.field.name)
 		return target_name(program, selector.expr)
 	}
 	return root_name(expression).name
+}
+
+note_write :: proc(program: ^Program, access: ^Access, expression: ^ast.Expr) {
+	if access == nil do return
+	if table := table_named(program, without_index(expression)); table != nil {
+		for column in table.fields do access.writes[column_name(table, column.name)] = true
+		return
+	}
+	access.writes[target_name(program, expression)] = true
+}
+
+// `enemies` in `enemies[target]`.
+without_index :: proc(expression: ^ast.Expr) -> ^ast.Expr {
+	if indexed, ok := expression.derived.(^ast.Index_Expr); ok do return indexed.expr
+	return expression
 }
 
 // A column or a per-row value needs a row of its table.
@@ -278,31 +296,35 @@ find_slot :: proc(procedure: ^Procedure, name: string) -> ^Slot {
 }
 
 // Every name read by an expression, not counting field names after a dot.
-gather_names :: proc(expression: ^ast.Expr) -> [dynamic]^ast.Ident {
+// Given `program`, a table under an index is left out: `enemies[target]` is one row, not each row.
+gather_names :: proc(expression: ^ast.Expr, program: ^Program = nil) -> [dynamic]^ast.Ident {
 	names: [dynamic]^ast.Ident
-	gather :: proc(expression: ^ast.Expr, names: ^[dynamic]^ast.Ident) {
+	gather :: proc(expression: ^ast.Expr, names: ^[dynamic]^ast.Ident, program: ^Program) {
 		if expression == nil do return
 		#partial switch node in expression.derived {
 		case ^ast.Ident:
 			append(names, node)
 		case ^ast.Selector_Expr:
-			gather(node.expr, names)
+			gather(node.expr, names, program)
+		case ^ast.Index_Expr:
+			if program == nil || table_named(program, node.expr) == nil do gather(node.expr, names, program)
+			gather(node.index, names, program)
 		case ^ast.Paren_Expr:
-			gather(node.expr, names)
+			gather(node.expr, names, program)
 		case ^ast.Unary_Expr:
-			gather(node.expr, names)
+			gather(node.expr, names, program)
 		case ^ast.Binary_Expr:
-			gather(node.left, names)
-			gather(node.right, names)
+			gather(node.left, names, program)
+			gather(node.right, names, program)
 		case ^ast.Comp_Lit:
-			for element in node.elems do gather(element, names)
+			for element in node.elems do gather(element, names, program)
 		case ^ast.Field_Value:
-			gather(node.value, names)
+			gather(node.value, names, program)
 		case ^ast.Call_Expr:
-			for argument in node.args do gather(argument, names)
+			for argument in node.args do gather(argument, names, program)
 		}
 	}
-	gather(expression, &names)
+	gather(expression, &names, program)
 	return names
 }
 
@@ -330,6 +352,8 @@ root_name :: proc(expression: ^ast.Expr) -> ^ast.Ident {
 		return node
 	case ^ast.Selector_Expr:
 		return root_name(node.expr)
+	case ^ast.Index_Expr:
+		return root_name(node.expr)
 	}
 	return nil
 }
@@ -344,7 +368,7 @@ check_assignment :: proc(program: ^Program, scope: ^Scope, assignment: ^ast.Assi
 		fail(location, "can only assign to a slot or state, %s is neither", root.name)
 	}
 
-	if is_field && find_slot(scope.procedure, root.name) == nil do scope.access.writes[root.name] = true
+	if is_field && find_slot(scope.procedure, root.name) == nil do note_write(program, scope.access, target)
 	target_type := type_of(program, scope, target)
 	value_type := type_of(program, scope, assignment.rhs[0])
 	if assignment.op.text != "=" {
@@ -391,7 +415,7 @@ note_row_tables :: proc(program: ^Program, part: ^Part, table: ^^Type, location:
 	}
 	switch part.kind {
 	case .Data, .Gate:
-		for name in gather_names(part.expression) {
+		for name in gather_names(part.expression, program) {
 			#partial switch found in program.names[name.name] {
 			case ^Field:
 				if found.type.kind == .Table do note(table, found.type, location)
@@ -424,12 +448,8 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 				fail(location, "a gate needs a bool, got %s", gate_type.name)
 			}
 		case .Data:
-			if table := table_named(program, part.expression); table != nil && access != nil {
-				for column in table.fields do access.writes[column_name(table, column.name)] = true
-				if part.appends do access.writes[column_name(table, "added")] = true
-			} else if access != nil {
-				access.writes[target_name(program, part.expression)] = true
-			}
+			note_write(program, access, part.expression)
+			if part.appends && access != nil do access.writes[column_name(table_named(program, part.expression), "added")] = true
 			if part.appends {
 				table := table_named(program, part.expression)
 				if flow != table.row do fail(location, "a row of %s is %s, got %s", table.name, table.row.name, flow.name)
@@ -668,6 +688,10 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 			}
 			fail(location, "%s has no case %s", enum_type.name, node.field.name)
 		}
+		if table := indexed_table(program, scope, node.expr); table != nil {
+			note_read(scope, column_name(table, node.field.name))
+			return struct_field(table.row, node.field.name, location).type
+		}
 		if table := table_named(program, node.expr); table != nil && find_slot(scope.procedure, table.name) == nil {
 			scope.touches_state = true
 			note_read(scope, column_name(table, node.field.name))
@@ -748,9 +772,41 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 			fail(location, "%s cannot be built with {}", type.name)
 		}
 		return type
+	case ^ast.Index_Expr:
+		if table := indexed_table(program, scope, node); table != nil {
+			for column in table.fields do note_read(scope, column_name(table, column.name))
+			return table.row
+		}
+		base := type_of(program, scope, node.expr)
+		if base.kind != .Array do fail(location, "only tables and fixed arrays take an index, %s does not", base.name)
+		check_index(program, scope, node)
+		if literal, is_literal := node.index.derived.(^ast.Basic_Lit); is_literal {
+			index, _ := strconv.parse_int(literal.tok.text)
+			if index >= base.count do fail(location, "%s holds %d, index %d is out of range", base.name, base.count, index)
+		} else if scope.access != nil {
+			scope.access.indexes = true
+		}
+		return base.element
 	}
-	// (hole index-syntax :tags types) no enemies[target].position reads or writes; out of range should be an abcont.
 	fail(location, "not allowed in eloq: %v", reflect.union_variant_typeid(expression.derived))
+}
+
+// The table of `enemies[target]`, nil for anything else.
+indexed_table :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Type {
+	indexed, ok := expression.derived.(^ast.Index_Expr)
+	if !ok do return nil
+	table := table_named(program, indexed.expr)
+	if table == nil || find_slot(scope.procedure, table.name) != nil do return nil
+	check_index(program, scope, indexed)
+	scope.touches_state = true
+	if scope.access != nil do scope.access.indexes = true
+	return table
+}
+
+check_index :: proc(program: ^Program, scope: ^Scope, indexed: ^ast.Index_Expr) {
+	if default_type(type_of(program, scope, indexed.index)).kind != .Integer {
+		fail(node_location(scope, indexed.index), "an index must be an integer")
+	}
 }
 
 struct_field :: proc(type: ^Type, name: string, location: Location) -> ^Field {

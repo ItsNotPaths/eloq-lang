@@ -1,0 +1,17 @@
+state coercion
+	amount  := 3
+	halved  := 0
+	scaled  := 0.0
+	precise : double
+
+mixed :: amount * 1.5
+
+twice ::
+	$float = float * 2
+
+half ::
+	$float = float / 2
+
+amount |twice| scaled
+amount |half|  halved
+mixed  |twice| precise

@@ -456,7 +456,7 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 				continue
 			}
 			check_target(program, &scope, part.expression, location)
-			if target_type := type_of(program, &scope, part.expression); target_type != flow {
+			if target_type := type_of(program, &scope, part.expression); !accepts(target_type, flow) {
 				fail(location, "cannot write %s to %s", flow.name, target_type.name)
 			}
 		case .Procedure:
@@ -494,10 +494,10 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 
 check_call :: proc(program: ^Program, procedure: ^Procedure, flow: ^Type, destination: ^Part, row_table: ^Type, location: Location) -> ^Type {
 	fed := procedure.input if procedure.input != nil else procedure.output
-	if fed.type != flow do fail(location, "%s takes %s, got %s", procedure.name, fed.type.name, flow.name)
+	if !accepts(fed.type, flow) do fail(location, "%s takes %s, got %s", procedure.name, fed.type.name, flow.name)
 	if procedure.output == nil do return flow
 	if destination != nil {
-		if destination_type(program, destination, row_table) != procedure.output.type {
+		if !accepts(destination_type(program, destination, row_table), procedure.output.type) {
 			fail(location, "%s gives %s, which does not fit its destination", procedure.name, procedure.output.type.name)
 		}
 	}
@@ -592,20 +592,29 @@ default_type :: proc(type: ^Type) -> ^Type {
 }
 
 
-// Whether a value of type `source` can be stored in `target`.
-// (hole coercion :tags types) strict; every coercion should be automatic by C rules, both widening and narrowing.
+// Whether a value of type `source` can be stored in `target`. Numbers convert both
+// ways, by C's rules.
 accepts :: proc(target, source: ^Type) -> bool {
 	if target == source do return true
-	if !source.untyped do return false
-	#partial switch target.kind {
-	case .Float:
-		return true
-	case .Integer:
-		return source == untyped_integer
-	case .Array:
-		return accepts(target.element, source)
-	}
+	if is_number(target) && is_number(source) do return true
+	if source.untyped && target.kind == .Array do return accepts(target.element, source)
 	return false
+}
+
+is_number :: proc(type: ^Type) -> bool {
+	return type.kind == .Integer || type.kind == .Float
+}
+
+// C's usual arithmetic conversions, by the common sizes.
+wider_number :: proc(left, right: ^Type) -> ^Type {
+	if left.kind != right.kind do return left if left.kind == .Float else right
+	if left.kind == .Integer && left.size < 4 && right.size < 4 do return builtin_type("int")
+	if left.size != right.size do return left if left.size > right.size else right
+	return right if is_unsigned(right) && !is_unsigned(left) else left
+}
+
+is_unsigned :: proc(type: ^Type) -> bool {
+	return strings.has_prefix(type.name, "u") || type.name == "size_t"
 }
 
 unify :: proc(left, right: ^Type, location: Location) -> ^Type {
@@ -614,10 +623,14 @@ unify :: proc(left, right: ^Type, location: Location) -> ^Type {
 		return left
 	case left.untyped && right.untyped:
 		return untyped_float
+	case left == untyped_float && right.kind == .Integer, right == untyped_float && left.kind == .Integer:
+		return untyped_float
 	case left.untyped && accepts(right, left):
 		return right
 	case right.untyped && accepts(left, right):
 		return left
+	case is_number(left) && is_number(right):
+		return wider_number(left, right)
 	}
 	fail(location, "type mismatch: %s and %s", left.name, right.name)
 }

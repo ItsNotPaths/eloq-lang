@@ -19,6 +19,7 @@ Type :: struct {
 	kind:            Type_Kind,
 	untyped:         bool, // a literal that takes the type of what it meets
 	builtin:         bool,
+	size:            int, // builtin numbers
 	location:        Location,
 	fields:          [dynamic]^Field, // Struct
 	cases:           [dynamic]string, // Enum
@@ -140,31 +141,33 @@ builtin_type :: proc(name: string) -> ^Type {
 }
 
 // (hole opaque-strings :tags types) no built-in string {data, len}, no char type, no == on arrays.
+// Sizes are the common ones, for C's arithmetic conversions; the host's compiler decides the real ones.
 BUILTIN_TYPES :: [?]struct {
 	name: string,
 	kind: Type_Kind,
+	size: int,
 } {
-	{"float", .Float},
-	{"double", .Float},
-	{"bool", .Boolean},
-	{"int", .Integer},
-	{"unsigned", .Integer},
-	{"char", .Integer},
-	{"size_t", .Integer},
-	{"int8_t", .Integer},
-	{"int16_t", .Integer},
-	{"int32_t", .Integer},
-	{"int64_t", .Integer},
-	{"uint8_t", .Integer},
-	{"uint16_t", .Integer},
-	{"uint32_t", .Integer},
-	{"uint64_t", .Integer},
+	{"float", .Float, 4},
+	{"double", .Float, 8},
+	{"bool", .Boolean, 1},
+	{"int", .Integer, 4},
+	{"unsigned", .Integer, 4},
+	{"char", .Integer, 1},
+	{"size_t", .Integer, 8},
+	{"int8_t", .Integer, 1},
+	{"int16_t", .Integer, 2},
+	{"int32_t", .Integer, 4},
+	{"int64_t", .Integer, 8},
+	{"uint8_t", .Integer, 1},
+	{"uint16_t", .Integer, 2},
+	{"uint32_t", .Integer, 4},
+	{"uint64_t", .Integer, 8},
 }
 
 build_program :: proc(items: []Item) -> Program {
 	program: Program
 	for builtin in BUILTIN_TYPES {
-		type := new_clone(Type{name = builtin.name, kind = builtin.kind, builtin = true})
+		type := new_clone(Type{name = builtin.name, kind = builtin.kind, builtin = true, size = builtin.size})
 		builtin_types[builtin.name] = type
 		program.names[builtin.name] = type
 	}

@@ -1,7 +1,0 @@
-state strict
-	amount := 1
-
-twice ::
-	$float = float * 2
-
-amount |twice| amount

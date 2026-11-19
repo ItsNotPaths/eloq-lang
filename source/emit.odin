@@ -503,6 +503,7 @@ Line_Emitter :: struct {
 	indent:       string,
 	flow_count:   int,
 	source_line:  int,
+	flow_is_row:  bool, // the line starts with its own table's row
 	has_line_end: bool,
 	row_table:    ^Type,
 	upper_name:   string,
@@ -514,7 +515,7 @@ Line_Emitter :: struct {
 // (hole parallel-lines :tags codegen) lines with disjoint write sets still run one after another.
 emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string, cached: ^map[string]bool) {
 	parts := line.parts[:]
-	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
+	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, flow_is_row = line.row_table != nil && table_named(program, parts[0].expression) == line.row_table, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
 
 	fmt.sbprintf(out, "\t{{ // %s:%d\n", line.location.path, line.location.line)
 	if table := table_flow(program, parts); table != nil {
@@ -577,8 +578,10 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 				emit_abcont(emitter, fmt.aprintf("%s >= %d", next_row, table.count), "TABLE_FULL", "0")
 				emit_row_store(out, indent, table, next_row, flow_variable)
 				fmt.sbprintf(out, "%sstate->%s.added += 1;\n", indent, table.name)
-			// (hole remove-write-back :tags tables :sev polish) |remove| shells still stores the unchanged row back.
 			case flow.kind == .Table:
+			case table != nil && flow_variable == "flow_1" && emitter.flow_is_row:
+				// the row read at the start, unchanged: `shells ?expired? |remove| shells`
+				fmt.sbprintf(out, "%s(void)flow_1;\n", indent)
 			case table != nil:
 				emit_row_store(out, indent, table, "row", flow_variable)
 			case:

@@ -89,6 +89,7 @@ Procedure :: struct {
 	status: Check_Status,
 	next_overload: ^Procedure, // the next proc of the same name
 	overloaded:    bool,
+	pipe:          [dynamic]Part, // a proc defined by a pipe: written in place where it is used
 }
 
 // `name :: ?subject?` with one arm per case. Value arms make an on-demand value,
@@ -211,10 +212,22 @@ add_value_pipe :: proc(program: ^Program, name: string, text: string, location: 
 	append(&program.definitions, definition)
 }
 
+// `length :: |length_squared| |sqrt|`: no data on either end.
+add_proc_pipe :: proc(program: ^Program, name: string, text: string, location: Location) {
+	line := parse_line(Source_Line{location = location, text = text})
+	for part in line.parts {
+		if part.kind != .Procedure do fail(location, "a proc pipe holds procs only, no gates or data")
+	}
+	procedure := new_clone(Procedure{name = name, pipe = line.parts})
+	procedure.parsed.location = location
+	add_name(program, name, procedure, location)
+}
+
 add_name :: proc(program: ^Program, name: string, value: Name, location: Location) {
 	if name == "remove" || name == "abends" do fail(location, "%s is built in", name)
 	if procedure, is_procedure := value.(^Procedure); is_procedure {
 		if first, is_first := program.names[name].(^Procedure); is_first {
+			if len(first.pipe) > 0 || len(procedure.pipe) > 0 do fail(location, "%s is a pipe, it cannot share its name", name)
 			add_overload(first, procedure)
 			return
 		}
@@ -254,9 +267,8 @@ add_definition :: proc(program: ^Program, item: Item) {
 		add_table(program, name, rest, item)
 	case strings.has_prefix(rest, "foreign "):
 		add_foreign(program, name, rest, location)
-	// (hole pipe-procs :tags types) a proc defined by a pipe, `length :: |length_squared| |sqrt|`, is not parsed.
 	case strings.has_prefix(rest, "|"):
-		fail(location, "procs defined by a pipe are not built yet")
+		add_proc_pipe(program, name, rest, location)
 	case strings.has_suffix(rest, "|"):
 		add_value_pipe(program, name, rest, location)
 	case:

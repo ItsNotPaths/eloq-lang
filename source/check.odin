@@ -92,6 +92,11 @@ node_location :: proc(scope: ^Scope, node: ^ast.Node) -> Location {
 }
 
 check_program :: proc(program: ^Program) {
+	for &line in program.lines do expand_proc_pipes(program, &line.parts)
+	for definition in program.definitions do expand_proc_pipes(program, &definition.pipe)
+	for match in program.matches {
+		for &arm in match.arms do expand_proc_pipes(program, &arm.parts)
+	}
 	for type in program.types do complete_type(program, type)
 	for field in program.fields do check_field(program, field)
 	for definition in program.definitions do check_definition(program, definition)
@@ -101,6 +106,29 @@ check_program :: proc(program: ^Program) {
 	}
 	for match in program.matches do check_match(program, match)
 	for &line in program.lines do check_line(program, &line)
+}
+
+// Procs defined by a pipe are written in place where they are used.
+expand_proc_pipes :: proc(program: ^Program, parts: ^[dynamic]Part) {
+	expanded: [dynamic]Part
+	for part in parts {
+		procedure, is_procedure := program.names[part.name].(^Procedure)
+		if part.kind != .Procedure || !is_procedure || len(procedure.pipe) == 0 {
+			append(&expanded, part)
+			continue
+		}
+		switch procedure.status {
+		case .Checking:
+			fail(procedure.parsed.location, "%s is defined in terms of itself", procedure.name)
+		case .Unchecked:
+			procedure.status = .Checking
+			expand_proc_pipes(program, &procedure.pipe)
+			procedure.status = .Checked
+		case .Checked:
+		}
+		append(&expanded, ..procedure.pipe[:])
+	}
+	parts^ = expanded
 }
 
 complete_type :: proc(program: ^Program, type: ^Type) {
@@ -410,7 +438,7 @@ gather_names :: proc(expression: ^ast.Expr, program: ^Program = nil) -> [dynamic
 	return names
 }
 
-// (hole math-procs :tags math :needs pipe-procs) C math is a call in expressions; should be reserved procs |sqrt| |atan2|, overloaded for float, double and arrays.
+// (hole math-procs :tags math) C math is a call in expressions; should be reserved procs |sqrt| |atan2|, overloaded for float, double and arrays.
 // C math, by its double name. A float argument calls the `f` version.
 math_arity :: proc(name: string) -> int {
 	switch name {

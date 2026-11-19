@@ -9,6 +9,8 @@ state pipes
 	moved_twice := 0.0
 	copy        := 0.0
 	total       := 0.0
+	eight_times := 0.0
+	from_value  := 0.0
 
 burn_fuel ::
 	$fuel = fuel - 3
@@ -22,9 +24,18 @@ move ::
 add_to_total ::
 	total = total + $float
 
+four_times  :: |twice| |twice|
+eight_fold  :: |four_times| |twice|
+fuel_four_times :: fuel |four_times|
+
+copy_float ::
+	$float = float
+
 fuel       ?> 0? |burn_fuel| fuel
 empty_tank ¿> 0? |burn_fuel| empty_tank
 velocity   |twice| doubled |twice| quadrupled
 velocity   |move| position
 velocity   |move| |twice| moved_twice
 velocity   |add_to_total| copy
+velocity   |eight_fold| eight_times
+fuel_four_times |copy_float| from_value

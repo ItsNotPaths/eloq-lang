@@ -12,5 +12,7 @@ int main(void) {
 	assert(state.position == 5.0f);                      // output starts as its destination
 	assert(state.moved_twice == 8.0f);                   // an unnamed destination starts at zero
 	assert(state.copy == 4.0f && state.total == 4.0f);   // no written slot passes the input on
+	assert(state.eight_times == 32.0f);                  // a proc made of a pipe, made of a pipe
+	assert(state.from_value == 28.0f);                   // a proc pipe in a value pipe
 	return 0;
 }

@@ -1,0 +1,9 @@
+state majority
+	fuel := 10.0
+
+burn ::
+	$float = float - 1
+
+fuel ¿> 0? |burn| fuel
+fuel ¿> 1? |burn| fuel
+fuel ¿> 2? |burn| fuel

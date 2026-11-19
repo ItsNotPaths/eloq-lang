@@ -6,7 +6,7 @@ import "core:strings"
 
 main :: proc() {
 	input_path, output_path: string
-	// (hole formatter :tags tooling) no --format: tabs, one opener (the more used of ? and ¿), --upside-down for ¿.
+	format, upside_down: bool
 	for argument in os.args[1:] {
 		switch {
 		case strings.has_prefix(argument, "-out:"):
@@ -23,13 +23,21 @@ main :: proc() {
 			reports.log_intermediates = true
 		case argument == "--report":
 			reports = {true, true, true, true}
+		case argument == "--format":
+			format = true
+		case argument == "--upside-down":
+			upside_down = true
 		case:
 			input_path = argument
 		}
 	}
 	if input_path == "" {
-		fmt.eprintln("usage: eloqc <program.eloq> [-out:<output path without extension>]")
+		fmt.eprintln("usage: eloqc <program.eloq> [-out:<output path without extension>] [--report] [--format [--upside-down]]")
 		os.exit(2)
+	}
+	if format {
+		format_file(input_path, upside_down)
+		return
 	}
 	if output_path == "" {
 		output_path = strip_extension(input_path)

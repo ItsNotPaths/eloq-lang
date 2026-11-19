@@ -1,0 +1,23 @@
+Fuel_State :: enum
+	full
+	empty
+
+state format_me
+	fuel := 10.0 // stays
+	fuel_state := Fuel_State.full
+
+thrust :: ¿fuel_state?
+	full : |burn| ¿> 1? |burn|
+	empty : |burn|
+
+burn ::
+	$float = float > 2 ? float : 0
+
+halve :: foreign float |proc| float
+	if (input > 1) {
+	    return input / 2;
+	}
+	return input;
+
+fuel ¿> 0? |thrust| fuel // a ¿comment? stays
+fuel ¿> 1? |halve| fuel

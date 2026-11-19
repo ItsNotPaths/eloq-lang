@@ -189,7 +189,7 @@ build_program :: proc(items: []Item) -> Program {
 }
 
 add_name :: proc(program: ^Program, name: string, value: Name, location: Location) {
-	if name == "remove" || name == "count" || name == "capacity" do fail(location, "%s is built in", name)
+	if name == "remove" || name == "count" || name == "capacity" || name == "abends" do fail(location, "%s is built in", name)
 	// (hole proc-overloading :tags types) one proc per name; procs should share a name when input slot types differ.
 	if name in program.names do fail(location, "%s is already defined", name)
 	program.names[name] = value

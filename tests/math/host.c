@@ -5,7 +5,7 @@
 int main(void) {
 	Math_Use state;
 	math_use_init(&state);
-	assert(math_use(&state) == MATH_USE_OK);
+	assert(math_use(&state) == 0);
 	assert(state.speed == 5.0f);                        // built-in math.eloq
 	assert(state.unit.x == 0.6f && state.unit.y == 0.8f);
 	assert(state.angle == atan2f(4, 3));                // C math in a body

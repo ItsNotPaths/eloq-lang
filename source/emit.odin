@@ -19,18 +19,20 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	emitted: map[^Type]bool
 	for type in program.types do emit_type(out, type, &emitted)
 	for field in program.fields do emit_type(out, field.type, &emitted)
+	fmt.sbprintf(out, "typedef enum {{\n")
+	for code in CODES do fmt.sbprintf(out, "\t%s_%s,\n", upper_name, code)
+	fmt.sbprintf(out, "}} %s;\n\n", abend_type)
+	fmt.sbprintf(out, "typedef struct {{\n\t%s code;\n\tint line;\n\tint row;\n\tint value;\n}} %s_Entry;\n\n", abend_type, abend_type)
+	fmt.sbprintf(out, "typedef struct {{\n\t%s_Entry entries[%d];\n\tint count;\n\tint dropped;\n\tbool stop_on_abcont;\n}} %ss;\n\n", abend_type, ABEND_CAPACITY, abend_type)
 	fmt.sbprintf(out, "typedef struct {{\n")
 	for field in program.fields do fmt.sbprintf(out, "\t%s %s;\n", c_type_name(field.type), field.name)
-	fmt.sbprintf(out, "}} %s;\n\n", state_type)
-	fmt.sbprintf(out, "typedef enum {{\n\t%s_OK,\n", upper_name)
-	for abend in ABENDS do fmt.sbprintf(out, "\t%s_ABEND_%s,\n", upper_name, abend)
-	fmt.sbprintf(out, "}} %s;\n\n", abend_type)
+	fmt.sbprintf(out, "\t%ss abends;\n}} %s;\n\n", abend_type, state_type)
 	fmt.sbprintf(out, "void %s_init(%s *state);\n", program.state_name, state_type)
-	fmt.sbprintf(out, "%s %s(%s *state);\n\n#endif\n", abend_type, program.state_name, state_type)
+	fmt.sbprintf(out, "int %s(%s *state);\n\n#endif\n", program.state_name, state_type)
 
 	source_builder := strings.builder_make()
 	out = &source_builder
-	fmt.sbprintf(out, "#include <math.h>\n#include \"%s.h\"\n\n", header_name)
+	fmt.sbprintf(out, "#include <math.h>\n#include <string.h>\n#include \"%s.h\"\n\n", header_name)
 	values := on_demand_values(program)
 	value_matches: [dynamic]^Match
 	for match in program.matches {
@@ -61,17 +63,19 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 		emit_expression(program, &scope, out, field.initial, field.type)
 		fmt.sbprintf(out, ";\n")
 	}
-	fmt.sbprintf(out, "}}\n\n%s %s(%s *state) {{\n", abend_type, program.state_name, state_type)
-	for field in program.fields {
-		emit_state_checks(out, field.type, fmt.aprintf("state->%s", field.name), upper_name, 1)
-	}
+	fmt.sbprintf(out, "}}\n\n")
 	tables := state_tables(program)
+	emit_abend_procs(out, tables, abend_type, state_type)
+	fmt.sbprintf(out, "int %s(%s *state) {{\n\tstate->abends.count = 0;\n\tstate->abends.dropped = 0;\n", program.state_name, state_type)
+	for field in program.fields {
+		emit_state_checks(out, field.type, fmt.aprintf("state->%s", field.name), upper_name, field.location.line, "-1", 1)
+	}
 	for table in tables {
 		if table.appends do fmt.sbprintf(out, "\tint %s_added = 0;\n", table.name)
 	}
 	emit_lines(program, out, upper_name)
 	for table in tables do emit_row_changes(out, table)
-	fmt.sbprintf(out, "\treturn %s_OK;\n}}\n", upper_name)
+	fmt.sbprintf(out, "\treturn state->abends.count + state->abends.dropped;\n}}\n")
 
 	return strings.to_string(header_builder), strings.to_string(source_builder)
 }
@@ -113,8 +117,26 @@ emit_type :: proc(out: Output, type: ^Type, emitted: ^map[^Type]bool) {
 	}
 }
 
-// (hole abend-detail :tags abends :needs abcont) no Abend_Detail in the state: line, row, value, abcont_count.
-ABENDS :: [?]string{"BAD_CASE", "BAD_COUNT", "TABLE_FULL"}
+CODES :: [?]string{"ABEND_BAD_CASE", "ABEND_BAD_COUNT", "ABCONT_TABLE_FULL"}
+ABEND_CAPACITY :: 16
+
+// Codes land in state->abends in the order they happen. A stop drops pending removes.
+emit_abend_procs :: proc(out: Output, tables: [dynamic]^Type, abend_type, state_type: string) {
+	parameters := fmt.aprintf("%s *state, %s code, int line, int row, int value", state_type, abend_type)
+	fmt.sbprintf(out, "static inline void record_abend(%s) {{\n", parameters)
+	fmt.sbprintf(out, "\tif (state->abends.count == %d) {{\n\t\tstate->abends.dropped += 1;\n\t\treturn;\n\t}}\n", ABEND_CAPACITY)
+	fmt.sbprintf(out, "\tstate->abends.entries[state->abends.count++] = (%s_Entry){{code, line, row, value}};\n}}\n\n", abend_type)
+	fmt.sbprintf(out, "static inline int stop_step(%s *state) {{\n", state_type)
+	for table in tables {
+		if table.removes do fmt.sbprintf(out, "\tmemset(state->%s.removed, 0, sizeof state->%s.removed);\n", table.name, table.name)
+	}
+	fmt.sbprintf(out, "\treturn state->abends.count + state->abends.dropped;\n}}\n\n")
+	fmt.sbprintf(out, "static inline int abend_step(%s) {{\n\trecord_abend(state, code, line, row, value);\n\treturn stop_step(state);\n}}\n\n", parameters)
+}
+
+abend_call :: proc(procedure, upper_name, code: string, line: int, row, value: string) -> string {
+	return fmt.aprintf("%s(state, %s_%s, %d, %s, %s)", procedure, upper_name, code, line, row, value)
+}
 
 state_tables :: proc(program: ^Program) -> [dynamic]^Type {
 	tables: [dynamic]^Type
@@ -326,15 +348,16 @@ emit_procedure :: proc(program: ^Program, output: Output, procedure: ^Procedure,
 }
 
 Line_Emitter :: struct {
-	program:    ^Program,
-	out:        Output,
-	number:     int,
-	indent:     string,
-	flow_count: int,
-	has_gate:   bool,
-	row_table:  ^Type,
-	upper_name: string,
-	cached:     ^map[string]bool,
+	program:      ^Program,
+	out:          Output,
+	number:       int,
+	indent:       string,
+	flow_count:   int,
+	source_line:  int,
+	has_line_end: bool,
+	row_table:    ^Type,
+	upper_name:   string,
+	cached:       ^map[string]bool,
 }
 
 // A line over a table is a loop over its rows. A gate skips to the next row.
@@ -342,7 +365,7 @@ Line_Emitter :: struct {
 // (hole parallel-lines :tags codegen) lines with disjoint write sets still run one after another.
 emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string, cached: ^map[string]bool) {
 	parts := line.parts[:]
-	emitter := Line_Emitter{program = program, out = out, number = number, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
+	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
 
 	fmt.sbprintf(out, "\t{{ // %s:%d\n", line.location.path, line.location.line)
 	outer_indent := emitter.indent
@@ -363,7 +386,7 @@ emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper
 	emit_parts(&emitter, parts[1:], flow, "flow_1", nil)
 
 	if line.repeat_count > 0 do fmt.sbprintf(out, "%s}}\n", loop_indent)
-	if emitter.has_gate do fmt.sbprintf(out, "%sline_%d_end:;\n", loop_indent, number)
+	if emitter.has_line_end do fmt.sbprintf(out, "%sline_%d_end:;\n", loop_indent, number)
 	if line.row_table != nil do fmt.sbprintf(out, "%s}}\n", outer_indent)
 	fmt.sbprintf(out, "\t}}\n")
 }
@@ -379,13 +402,12 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 			fmt.sbprintf(out, "%sif (!(", indent)
 			emit_expression(program, &scope, out, part.expression, nil)
 			fmt.sbprintf(out, ")) goto line_%d_end;\n", emitter.number)
-			emitter.has_gate = true
+			emitter.has_line_end = true
 		case .Data:
 			table := table_named(program, part.expression)
 			switch {
 			case part.appends:
-				// (hole abcont :tags (tables abends)) TABLE_FULL is an abend; should be an abcont that drops the add and finishes the step.
-				fmt.sbprintf(out, "%sif (state->%s.count + %s_added >= %d) return %s_ABEND_TABLE_FULL;\n", indent, table.name, table.name, table.count, emitter.upper_name)
+				emit_abcont(emitter, fmt.aprintf("state->%s.count + %s_added >= %d", table.name, table.name, table.count), "TABLE_FULL", "0")
 				emit_row_store(out, indent, table, fmt.aprintf("state->%s.count + %s_added", table.name, table.name), flow_variable)
 				fmt.sbprintf(out, "%s%s_added += 1;\n", indent, table.name)
 			// (hole remove-write-back :tags tables :sev polish) |remove| shells still stores the unchanged row back.
@@ -412,9 +434,9 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 				flow = found.output.type
 				flow_variable = next_flow(emitter)
 				fmt.sbprintf(out, "%s%s %s = %s;\n", indent, c_type_name(flow), flow_variable, call)
-				// (hole abend-removed-flags :tags (tables abends)) an abend mid-step leaves removed flags set; it should clear them before it returns.
 				if found.foreign_name != "" && flow.kind == .Enum {
-					fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s_ABEND_BAD_CASE;\n", indent, flow_variable, len(flow.cases), emitter.upper_name)
+					call := abend_call("abend_step", emitter.upper_name, "ABEND_BAD_CASE", emitter.source_line, emitter_row(emitter), fmt.aprintf("(int)%s", flow_variable))
+					fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s;\n", indent, flow_variable, len(flow.cases), call)
 				}
 			case ^Match:
 				output := check_parts(program, found.arms[0].parts[:], flow, destination, emitter.row_table, nil, found.location)
@@ -434,6 +456,19 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 		}
 	}
 	return flow_variable
+}
+
+// An abcont skips the rest of the line for this row, or stops the step if the host asks.
+emit_abcont :: proc(emitter: ^Line_Emitter, condition, abcont, value: string) {
+	call := abend_call("record_abend", emitter.upper_name, strings.concatenate({"ABCONT_", abcont}), emitter.source_line, emitter_row(emitter), value)
+	fmt.sbprintf(emitter.out, "%sif (%s) {{\n%s\t%s;\n", emitter.indent, condition, emitter.indent, call)
+	fmt.sbprintf(emitter.out, "%s\tif (state->abends.stop_on_abcont) return stop_step(state);\n", emitter.indent)
+	fmt.sbprintf(emitter.out, "%s\tgoto line_%d_end;\n%s}}\n", emitter.indent, emitter.number, emitter.indent)
+	emitter.has_line_end = true
+}
+
+emitter_row :: proc(emitter: ^Line_Emitter) -> string {
+	return "row" if emitter.row_table != nil else "-1"
 }
 
 next_flow :: proc(emitter: ^Line_Emitter) -> string {
@@ -505,18 +540,20 @@ emit_value_match :: proc(program: ^Program, out: Output, match: ^Match, state_ty
 }
 
 // A host can write any number into an enum or a table count. Catch it before anything reads it.
-emit_state_checks :: proc(out: Output, type: ^Type, path: string, upper_name: string, depth: int) {
+emit_state_checks :: proc(out: Output, type: ^Type, path: string, upper_name: string, line: int, row: string, depth: int) {
 	indent := strings.repeat("\t", depth)
 	if type.kind == .Table {
-		fmt.sbprintf(out, "%sif ((unsigned)%s.count > %d) return %s_ABEND_BAD_COUNT;\n", indent, path, type.count, upper_name)
+		call := abend_call("abend_step", upper_name, "ABEND_BAD_COUNT", line, row, fmt.aprintf("%s.count", path))
+		fmt.sbprintf(out, "%sif ((unsigned)%s.count > %d) return %s;\n", indent, path, type.count, call)
 	}
 	if !holds_enum(type) do return
 	#partial switch type.kind {
 	case .Enum:
-		fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s_ABEND_BAD_CASE;\n", indent, path, len(type.cases), upper_name)
+		call := abend_call("abend_step", upper_name, "ABEND_BAD_CASE", line, row, fmt.aprintf("(int)%s", path))
+		fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s;\n", indent, path, len(type.cases), call)
 	case .Struct:
 		for field in type.fields {
-			emit_state_checks(out, field.type, fmt.aprintf("%s.%s", path, field.name), upper_name, depth)
+			emit_state_checks(out, field.type, fmt.aprintf("%s.%s", path, field.name), upper_name, line, row, depth)
 		}
 	case .Array, .Table:
 		index := fmt.aprintf("index_%d", depth)
@@ -524,10 +561,10 @@ emit_state_checks :: proc(out: Output, type: ^Type, path: string, upper_name: st
 		fmt.sbprintf(out, "%sfor (int %s = 0; %s < %s; %s += 1) {{\n", indent, index, index, limit, index)
 		if type.kind == .Table {
 			for column in type.fields {
-				emit_state_checks(out, column.type, fmt.aprintf("%s.%s[%s]", path, column.name, index), upper_name, depth + 1)
+				emit_state_checks(out, column.type, fmt.aprintf("%s.%s[%s]", path, column.name, index), upper_name, line, index, depth + 1)
 			}
 		} else {
-			emit_state_checks(out, type.element, fmt.aprintf("%s.elements[%s]", path, index), upper_name, depth + 1)
+			emit_state_checks(out, type.element, fmt.aprintf("%s.elements[%s]", path, index), upper_name, line, row, depth + 1)
 		}
 		fmt.sbprintf(out, "%s}}\n", indent)
 	}

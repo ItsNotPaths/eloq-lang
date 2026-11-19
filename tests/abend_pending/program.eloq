@@ -1,0 +1,25 @@
+Fuel_State :: enum
+	full
+	empty
+
+shells :: table 4
+	lifetime : float
+
+sparks :: table 1
+	heat : int
+
+state abend_pending
+	gauge      := 0
+	fuel_state := Fuel_State.full
+
+expired :: shells.lifetime <= 0
+
+make_spark ::
+	$sparks.heat = $int
+
+read_gauge :: foreign "read_gauge" int |proc| Fuel_State
+
+shells ?expired? |remove| shells
+gauge  |make_spark| sparks
+gauge  |make_spark| sparks
+gauge  |read_gauge| fuel_state

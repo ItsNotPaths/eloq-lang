@@ -739,7 +739,7 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 		}
 		return type
 	}
-	// (hole index-syntax :tags types :needs abcont) no enemies[target].position reads or writes; out of range should be an abcont.
+	// (hole index-syntax :tags types) no enemies[target].position reads or writes; out of range should be an abcont.
 	fail(location, "not allowed in eloq: %v", reflect.union_variant_typeid(expression.derived))
 }
 

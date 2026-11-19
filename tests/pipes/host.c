@@ -4,7 +4,7 @@
 int main(void) {
 	Pipes state;
 	pipes_init(&state);
-	assert(pipes(&state) == PIPES_OK);
+	assert(pipes(&state) == 0);
 	assert(state.fuel == 7.0f);
 	assert(state.empty_tank == 0.0f);                    // a false gate stops the line
 	assert(state.doubled == 8.0f);                       // names mid-chain are written

@@ -1,11 +1,18 @@
 sparks :: table 1
 	heat : float
 
+embers :: table 20
+	heat : float
+
 state forge
 	heat_source := 1.0
+	bellows     := 0.0
 
 make_spark ::
 	$sparks.heat = $float
 
-heat_source |make_spark| sparks
-heat_source |make_spark| sparks
+warm ::
+	$bellows = $heat
+
+embers.heat |make_spark| sparks
+heat_source |warm|       bellows

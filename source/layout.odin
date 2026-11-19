@@ -26,7 +26,7 @@ read_source :: proc(path: string) -> [dynamic]Source_Line {
 			append(&lines, line)
 			continue
 		}
-		for inserted_path in insert_paths(strings.concatenate({directory, target}), line) {
+		for inserted_path in insert_paths(strings.concatenate({directory, target}), target, line) {
 			if inserted[inserted_path] do continue
 			inserted[inserted_path] = true
 			for inserted_line in file_lines(inserted_path) {
@@ -40,13 +40,19 @@ read_source :: proc(path: string) -> [dynamic]Source_Line {
 }
 
 file_lines :: proc(path: string) -> [dynamic]Source_Line {
-	data, error := os.read_entire_file(path, context.allocator)
-	if error != nil {
-		fmt.eprintfln("cannot read %s: %v", path, error)
-		os.exit(1)
+	source: string
+	if strings.has_prefix(path, BAKED_DIRECTORY) {
+		source, _ = baked_text(path[len(BAKED_DIRECTORY):])
+	} else {
+		data, error := os.read_entire_file(path, context.allocator)
+		if error != nil {
+			fmt.eprintfln("cannot read %s: %v", path, error)
+			os.exit(1)
+		}
+		source = string(data)
 	}
 	lines: [dynamic]Source_Line
-	for text, index in strings.split(string(data), "\n") {
+	for text, index in strings.split(source, "\n") {
 		append(&lines, Source_Line{{path, index + 1}, strings.trim_right(text, "\r")})
 	}
 	return lines
@@ -57,11 +63,28 @@ insert_target :: proc(text: string) -> (target: string, is_insert: bool) {
 	return strings.trim_space(strip_comment(text[len("insert "):])), true
 }
 
+// Files built into the compiler, inserted when no local file has the name.
+BAKED_FILES := [?]struct {
+	name: string,
+	text: string,
+} {
+	{"math.eloq", #load("../library/math.eloq", string)},
+}
+BAKED_DIRECTORY :: "eloqc/"
+
+baked_text :: proc(name: string) -> (text: string, found: bool) {
+	for file in BAKED_FILES {
+		if file.name == name || file.name == strings.concatenate({name, ".eloq"}) do return file.text, true
+	}
+	return "", false
+}
+
 // A folder inserts every eloq file in it.
-insert_paths :: proc(path: string, line: Source_Line) -> []string {
+insert_paths :: proc(path: string, target: string, line: Source_Line) -> []string {
 	if !os.is_directory(path) {
-		if !os.exists(path) do fail(line, "insert: %s not found", path)
-		return slice.clone([]string{path})
+		if os.exists(path) do return slice.clone([]string{path})
+		if _, found := baked_text(target); found do return slice.clone([]string{strings.concatenate({BAKED_DIRECTORY, target})})
+		fail(line, "insert: %s not found", path)
 	}
 	entries, error := os.read_directory_by_path(path, -1, context.allocator)
 	if error != nil do fail(line, "insert: cannot read %s", path)

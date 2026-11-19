@@ -1,0 +1,13 @@
+// Built into eloqc. `insert math` uses it when no local math.eloq exists.
+Vector2 :: [2]float
+Vector3 :: [3]float
+Vector4 :: [4]float
+
+pi  :: 3.14159265358979323846
+tau :: 6.28318530717958647692
+
+length ::
+	$float = sqrt($Vector3.x * Vector3.x + Vector3.y * Vector3.y + Vector3.z * Vector3.z)
+
+normalize ::
+	$Vector3 = Vector3 / sqrt(Vector3.x * Vector3.x + Vector3.y * Vector3.y + Vector3.z * Vector3.z)

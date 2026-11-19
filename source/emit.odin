@@ -13,7 +13,8 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	header_builder := strings.builder_make()
 	out := &header_builder
 	guard := strings.to_upper(strings.concatenate({header_name, "_H"}))
-	fmt.sbprintf(out, "#ifndef %s\n#define %s\n\n#include <stdbool.h>\n#include <stdint.h>\n#include <stddef.h>\n#include \"eloq.h\"\n\n", guard, guard)
+	// Outside the guard, so a later include with ELOQ_STDIO defined still reaches eloq.h's stdio part.
+	fmt.sbprintf(out, "#include \"eloq.h\"\n\n#ifndef %s\n#define %s\n\n#include <stdbool.h>\n#include <stdint.h>\n#include <stddef.h>\n\n", guard, guard)
 	emitted: map[^Type]bool
 	for type in program.types do emit_type(out, type, &emitted)
 	for field in program.fields do emit_type(out, field.type, &emitted)

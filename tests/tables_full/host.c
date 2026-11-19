@@ -1,5 +1,6 @@
 #include <assert.h>
-#define ELOQ_STDIO
+#include "program.h"
+#define ELOQ_STDIO   // after a first include, as when another header pulled it in
 #include "program.h"
 
 int main(void) {

@@ -90,6 +90,7 @@ Part :: struct {
 	kind:       Part_Kind,
 	name:       string, // Procedure
 	expression: ^ast.Expr, // Data, Gate
+	text:       string, // Data: as written, for --log-intermediates
 	parsed:     Parsed,
 	appends:    bool, // Data: a table that gets a new row
 }
@@ -143,7 +144,7 @@ parse_line :: proc(source: Source_Line) -> Line {
 				if found := strings.index(rest, stop); found >= 0 do end = min(end, found)
 			}
 			expression, parsed := parse_expression(rest[:end], source)
-			append(&line.parts, Part{kind = .Data, expression = expression, parsed = parsed})
+			append(&line.parts, Part{kind = .Data, expression = expression, parsed = parsed, text = rest[:end]})
 			position += end
 		}
 	}

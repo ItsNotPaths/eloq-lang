@@ -1,0 +1,6 @@
+tests/log_intermediates/program.eloq:22: doubled = 8
+tests/log_intermediates/program.eloq:22: quadrupled = 16
+tests/log_intermediates/program.eloq:23: aim = {1, 2}
+tests/log_intermediates/program.eloq:24: ready = true
+tests/log_intermediates/program.eloq:25 row 0: crates.weight = 2
+tests/log_intermediates/program.eloq:25 row 1: crates.weight = 6

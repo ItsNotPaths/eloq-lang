@@ -33,7 +33,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 
 	source_builder := strings.builder_make()
 	out = &source_builder
-	fmt.sbprintf(out, "#include <math.h>\n#include <string.h>\n#include \"%s.h\"\n\n", header_name)
+	fmt.sbprintf(out, "#include <math.h>\n#include <string.h>\n%s#include \"%s.h\"\n\n", "#include <stdio.h>\n" if reports.log_intermediates else "", header_name)
 	tables := state_tables(program)
 	emit_abend_procs(out, tables, abend_type, state_type)
 	values := on_demand_values(program)
@@ -571,6 +571,7 @@ Line_Emitter :: struct {
 	indent:       string,
 	flow_count:   int,
 	source_line:  int,
+	location:     Location,
 	flow_is_row:  bool, // the line starts with its own table's row
 	has_line_end: bool,
 	row_table:    ^Type,
@@ -579,10 +580,9 @@ Line_Emitter :: struct {
 }
 
 // A line over a table is a loop over its rows. A gate skips to the next row.
-// (hole intermediate-logging :tags tooling :sev polish) no --log-intermediates: the step should print every named intermediate, each row.
 emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string, cached: ^map[string]bool) {
 	parts := line.parts[:]
-	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, flow_is_row = line.row_table != nil && table_named(program, parts[0].expression) == line.row_table, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
+	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, location = line.location, flow_is_row = line.row_table != nil && table_named(program, parts[0].expression) == line.row_table, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
 
 	fmt.sbprintf(out, "\t{{ // %s:%d\n", line.location.path, line.location.line)
 	if table := table_flow(program, parts); table != nil {
@@ -668,6 +668,7 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 					fmt.sbprintf(out, " = %s%s;\n", flow_variable, element_access(target_type, element) if target_type.kind == .Array else "")
 				}
 			}
+			if reports.log_intermediates && flow.kind != .Table do emit_log(emitter, part.text, flow_variable, flow)
 		case .Procedure:
 			destination := destination_of(parts[index + 1:], outer)
 			if math_arity(part.name) > 0 {
@@ -743,6 +744,62 @@ line_skip :: proc(emitter: ^Line_Emitter) -> string {
 
 emitter_row :: proc(emitter: ^Line_Emitter) -> string {
 	return "row" if emitter.row_table != nil else "-1"
+}
+
+// `program.eloq:12 row 3: doubled = 8`, as the step runs.
+emit_log :: proc(emitter: ^Line_Emitter, name: string, value: string, type: ^Type) {
+	format := strings.builder_make()
+	arguments: [dynamic]string
+	strings.write_string(&format, format_literal_text(fmt.aprintf("%s:%d", emitter.location.path, emitter.location.line)))
+	if emitter.row_table != nil {
+		strings.write_string(&format, " row %d")
+		append(&arguments, "row")
+	}
+	strings.write_string(&format, ": ")
+	strings.write_string(&format, format_literal_text(strings.trim_space(name)))
+	strings.write_string(&format, " = ")
+	log_format(&format, &arguments, value, type)
+	text, _ := strings.replace_all(strings.to_string(format), "\"", "\\\"")
+	fmt.sbprintf(emitter.out, "%sprintf(\"%s\\n\"%s%s);\n", emitter.indent, text, ", " if len(arguments) > 0 else "", strings.join(arguments[:], ", "))
+}
+
+format_literal_text :: proc(text: string) -> string {
+	escaped, _ := strings.replace_all(text, "%", "%%")
+	return escaped
+}
+
+log_format :: proc(format: ^strings.Builder, arguments: ^[dynamic]string, value: string, type: ^Type) {
+	type := default_type(type)
+	switch type.kind {
+	case .Float:
+		strings.write_string(format, "%g")
+		append(arguments, fmt.aprintf("(double)(%s)", value))
+	case .Integer, .Enum:
+		strings.write_string(format, "%lld")
+		append(arguments, fmt.aprintf("(long long)(%s)", value))
+	case .Boolean:
+		strings.write_string(format, "%s")
+		append(arguments, fmt.aprintf("(%s) ? \"true\" : \"false\"", value))
+	case .String:
+		strings.write_string(format, "%.*s")
+		append(arguments, fmt.aprintf("(%s).len, (%s).data", value, value))
+	case .Array:
+		strings.write_string(format, "{")
+		for index in 0 ..< type.count {
+			if index > 0 do strings.write_string(format, ", ")
+			log_format(format, arguments, strings.concatenate({value, element_access(type, index)}), type.element)
+		}
+		strings.write_string(format, "}")
+	case .Struct:
+		strings.write_string(format, "{")
+		for field, index in type.fields {
+			if index > 0 do strings.write_string(format, ", ")
+			strings.write_string(format, strings.concatenate({field.name, " = "}))
+			log_format(format, arguments, strings.concatenate({value, ".", field.name}), field.type)
+		}
+		strings.write_string(format, "}")
+	case .Table:
+	}
 }
 
 next_flow :: proc(emitter: ^Line_Emitter) -> string {

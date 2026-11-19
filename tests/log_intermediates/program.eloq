@@ -1,0 +1,25 @@
+Vector :: [2]float
+
+crates :: table 4
+	weight : float
+
+state logged
+	velocity   := 4.0
+	doubled    := 0.0
+	quadrupled := 0.0
+	aim        := Vector{1, 2}
+	ready      := false
+
+twice ::
+	$float = float * 2
+
+copy_vector ::
+	$Vector = Vector
+
+set_ready ::
+	$bool = true
+
+velocity      |twice| doubled |twice| quadrupled
+aim           |copy_vector| aim
+ready         |set_ready| ready
+crates.weight |twice| crates.weight

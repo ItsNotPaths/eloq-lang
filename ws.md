@@ -27,8 +27,7 @@ The decisions are in `docs/design.md`. In short:
 - `opaque-strings`: built-in `string` as Odin's `{data, len}`; fixed text is `[N]char`.
 - `proc-overloading`, `vector2-procs`: procs share a name when input slot types differ.
 
-The abend codes are built. Next: `pending-count`, then `index-syntax` (out of range uses the
-abcont), then `coercion`, then the rest.
+Built.
 
 <!-- (skeleton :tags (tables abends types math)) -->
 

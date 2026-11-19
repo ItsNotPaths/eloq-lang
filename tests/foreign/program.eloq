@@ -1,0 +1,28 @@
+Fuel_State :: enum
+	full
+	low
+	empty
+
+Direction :: struct
+	y : float
+	x : float
+
+state foreign_calls
+	area       := 16.0
+	side       := 0.0
+	heading    := Direction{y = 1, x = 0}
+	angle      := 0.0
+	sound      := 3
+	played     := 0
+	gauge      := 1
+	fuel_state := Fuel_State.full
+
+square_root :: foreign "sqrtf" float |proc| float
+angle_of    :: foreign "atan2f" Direction |proc| float
+play_sound  :: foreign "play_sound" int |proc|
+read_gauge  :: foreign "read_gauge" int |proc| Fuel_State
+
+area    |square_root| side
+heading |angle_of|    angle
+sound   |play_sound|  played
+gauge   |read_gauge|  fuel_state

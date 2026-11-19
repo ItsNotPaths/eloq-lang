@@ -29,7 +29,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 
 	source_builder := strings.builder_make()
 	out = &source_builder
-	fmt.sbprintf(out, "#include \"%s.h\"\n\n", header_name)
+	fmt.sbprintf(out, "#include <math.h>\n#include \"%s.h\"\n\n", header_name)
 	values := on_demand_values(program)
 	value_matches: [dynamic]^Match
 	for match in program.matches {
@@ -37,7 +37,10 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	}
 	for definition in values do fmt.sbprintf(out, "%s;\n", value_signature(definition.name, definition.type, definition.row_table, state_type))
 	for match in value_matches do fmt.sbprintf(out, "%s;\n", value_signature(match.name, match.type, match.row_table, state_type))
-	for procedure in program.procedures do fmt.sbprintf(out, "%s;\n", procedure_signature(procedure, state_type))
+	for procedure in program.procedures {
+		signature := foreign_signature(procedure) if procedure.foreign_name != "" else procedure_signature(procedure, state_type)
+		fmt.sbprintf(out, "%s;\n", signature)
+	}
 	for definition in values {
 		scope := Scope{parsed = &definition.parsed, row_table = definition.row_table}
 		fmt.sbprintf(out, "\n%s {{\n\treturn ", value_signature(definition.name, definition.type, definition.row_table, state_type))
@@ -45,7 +48,9 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 		fmt.sbprintf(out, ";\n}}\n")
 	}
 	for match in value_matches do emit_value_match(program, out, match, state_type)
-	for procedure in program.procedures do emit_procedure(program, out, procedure, state_type)
+	for procedure in program.procedures {
+		if procedure.foreign_name == "" do emit_procedure(program, out, procedure, state_type)
+	}
 
 	fmt.sbprintf(out, "\nvoid %s_init(%s *state) {{\n\t*state = (%s){{0}};\n", program.state_name, state_type, state_type)
 	for field in program.fields {
@@ -175,6 +180,32 @@ value_signature :: proc(name: string, type: ^Type, row_table: ^Type, state_type:
 	return fmt.aprintf("static inline %s value_%s(const %s *state%s)", c_type_name(type), name, state_type, row)
 }
 
+// A struct or array input is spread into one argument per field.
+foreign_signature :: proc(procedure: ^Procedure) -> string {
+	parameters: [dynamic]string
+	for argument in foreign_arguments(procedure.input.type, "") do append(&parameters, c_type_name(argument.type))
+	return_type := c_type_name(procedure.output.type) if procedure.output != nil else "void"
+	return fmt.aprintf("%s %s(%s)", return_type, procedure.foreign_name, strings.join(parameters[:], ", "))
+}
+
+Foreign_Argument :: struct {
+	type: ^Type,
+	path: string, // after the flow variable: ".x"
+}
+
+foreign_arguments :: proc(type: ^Type, path: string) -> [dynamic]Foreign_Argument {
+	arguments: [dynamic]Foreign_Argument
+	#partial switch type.kind {
+	case .Struct:
+		for field in type.fields do append(&arguments, Foreign_Argument{field.type, fmt.aprintf("%s.%s", path, field.name)})
+	case .Array:
+		for index in 0 ..< type.count do append(&arguments, Foreign_Argument{type.element, fmt.aprintf("%s%s", path, element_access(type, index))})
+	case:
+		append(&arguments, Foreign_Argument{type, path})
+	}
+	return arguments
+}
+
 // Parameters: the read-only slot, then the written slot. Returns the written slot.
 procedure_signature :: proc(procedure: ^Procedure, state_type: string) -> string {
 	builder := strings.builder_make()
@@ -297,6 +328,9 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 				flow = found.output.type
 				flow_variable = next_flow(emitter)
 				fmt.sbprintf(out, "%s%s %s = %s;\n", indent, c_type_name(flow), flow_variable, call)
+				if found.foreign_name != "" && flow.kind == .Enum {
+					fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s_ABEND_BAD_CASE;\n", indent, flow_variable, len(flow.cases), emitter.upper_name)
+				}
 			case ^Match:
 				output := check_parts(program, found.arms[0].parts[:], flow, destination, emitter.row_table, found.location)
 				result := next_flow(emitter)
@@ -323,6 +357,13 @@ next_flow :: proc(emitter: ^Line_Emitter) -> string {
 }
 
 procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: string, destination: ^Part, row_table: ^Type) -> string {
+	if procedure.foreign_name != "" {
+		values: [dynamic]string
+		for argument in foreign_arguments(procedure.input.type, "") {
+			append(&values, strings.concatenate({flow_variable, argument.path}))
+		}
+		return fmt.aprintf("%s(%s)", procedure.foreign_name, strings.join(values[:], ", "))
+	}
 	arguments := strings.builder_make()
 	fmt.sbprintf(&arguments, "state, %s", flow_variable)
 	if procedure.input != nil && procedure.output != nil {
@@ -505,12 +546,20 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 		}
 		fmt.sbprintf(out, " }}")
 	case ^ast.Call_Expr:
-		table := table_named(program, node.args[0])
-		if node.expr.derived.(^ast.Ident).name == "count" {
-			fmt.sbprintf(out, "state->%s.count", table.name)
-		} else {
-			fmt.sbprintf(out, "%d", table.count)
+		name := node.expr.derived.(^ast.Ident).name
+		if is_table_call(node) {
+			table := table_named(program, node.args[0])
+			if name == "count" do fmt.sbprintf(out, "state->%s.count", table.name)
+			else do fmt.sbprintf(out, "%d", table.count)
+			return
 		}
+		scalar := type.element if type.kind == .Array else type
+		fmt.sbprintf(out, "%s%s(", name, "f" if scalar.name == "float" else "")
+		for argument, index in node.args {
+			if index > 0 do fmt.sbprintf(out, ", ")
+			emit_expression(program, scope, out, argument, type, element)
+		}
+		fmt.sbprintf(out, ")")
 	}
 }
 
@@ -521,6 +570,8 @@ distributes :: proc(expression: ^ast.Expr) -> bool {
 		return true
 	case ^ast.Paren_Expr:
 		return distributes(node.expr)
+	case ^ast.Call_Expr:
+		return !is_table_call(node)
 	}
 	return false
 }

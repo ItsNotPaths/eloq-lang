@@ -67,6 +67,8 @@ Slot :: struct {
 Procedure :: struct {
 	name:   string,
 	parsed: Parsed,
+	foreign_name: string, // a C function: never sees the state
+	foreign_types: [2]^ast.Expr, // input, output (nil when void)
 	slots:  [dynamic]Slot,
 	input:  ^Slot, // the read-only slot
 	output: ^Slot, // the written slot
@@ -203,8 +205,8 @@ add_definition :: proc(program: ^Program, item: Item) {
 		add_match(program, name, rest, item)
 	case strings.has_prefix(rest, "table "):
 		add_table(program, name, rest, item)
-	case strings.has_prefix(rest, "foreign"):
-		fail(location, "%s: not built yet", rest)
+	case strings.has_prefix(rest, "foreign "):
+		add_foreign(program, name, rest, location)
 	case:
 		add_declaration(program, item.header.text, location)
 	}
@@ -236,6 +238,24 @@ add_table :: proc(program: ^Program, name: string, header: string, item: Item) {
 	field := new_clone(Field{name = name, location = location, type = table})
 	add_name(program, name, field, location)
 	append(&program.fields, field)
+}
+
+// `name :: foreign "c_name" Input |proc| Output`, Output left out for void.
+add_foreign :: proc(program: ^Program, name: string, header: string, location: Location) {
+	rest := strings.trim_space(header[len("foreign "):])
+	if !strings.has_prefix(rest, "\"") do fail(location, "foreign needs the C name in quotes")
+	end := strings.index_byte(rest[1:], '"')
+	if end < 1 do fail(location, "foreign needs the C name in quotes")
+	procedure := new_clone(Procedure{name = name, foreign_name = rest[1:][:end]})
+	input_text, separator, output_text := strings.partition(rest[end + 2:], "|proc|")
+	if separator == "" do fail(location, "foreign is written: foreign \"c_name\" Input |proc| Output")
+	procedure.parsed.location = location
+	procedure.foreign_types[0], _ = parse_expression(strings.trim_space(input_text), location)
+	if output := strings.trim_space(output_text); output != "" {
+		procedure.foreign_types[1], _ = parse_expression(output, location)
+	}
+	add_name(program, name, procedure, location)
+	append(&program.procedures, procedure)
 }
 
 add_match :: proc(program: ^Program, name: string, header: string, item: Item) {

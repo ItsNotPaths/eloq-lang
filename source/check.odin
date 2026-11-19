@@ -133,6 +133,10 @@ check_definition :: proc(program: ^Program, definition: ^Definition) {
 check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 	location := procedure.parsed.location
 	scope := Scope{parsed = &procedure.parsed, procedure = procedure}
+	if procedure.foreign_name != "" {
+		check_foreign(program, procedure)
+		return
+	}
 
 	for statement in procedure.parsed.statements {
 		assignment, ok := statement.derived.(^ast.Assign_Stmt)
@@ -173,6 +177,16 @@ check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 		check_assignment(program, &scope, statement.derived.(^ast.Assign_Stmt))
 	}
 	procedure.touches_state = scope.touches_state
+}
+
+check_foreign :: proc(program: ^Program, procedure: ^Procedure) {
+	scope := Scope{parsed = &procedure.parsed}
+	for expression, index in procedure.foreign_types {
+		if expression == nil do continue
+		append(&procedure.slots, Slot{name = index == 0 ? "input" : "output", type = resolve_type(program, &scope, expression), read = index == 0, written = index == 1})
+	}
+	procedure.input = &procedure.slots[0]
+	if len(procedure.slots) == 2 do procedure.output = &procedure.slots[1]
 }
 
 // A column name as a slot label, when every table agrees on its type.
@@ -232,10 +246,31 @@ gather_names :: proc(expression: ^ast.Expr) -> [dynamic]^ast.Ident {
 			for element in node.elems do gather(element, names)
 		case ^ast.Field_Value:
 			gather(node.value, names)
+		case ^ast.Call_Expr:
+			if !is_table_call(node) {
+				for argument in node.args do gather(argument, names)
+			}
 		}
 	}
 	gather(expression, &names)
 	return names
+}
+
+// C math, by its double name. A float argument calls the `f` version.
+math_arity :: proc(name: string) -> int {
+	switch name {
+	case "sqrt", "cbrt", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
+	     "exp", "exp2", "log", "log2", "log10", "floor", "ceil", "round", "trunc", "fabs":
+		return 1
+	case "atan2", "pow", "fmod", "fmin", "fmax", "hypot", "copysign":
+		return 2
+	}
+	return 0
+}
+
+is_table_call :: proc(call: ^ast.Call_Expr) -> bool {
+	name, is_name := call.expr.derived.(^ast.Ident)
+	return is_name && (name.name == "count" || name.name == "capacity")
 }
 
 // The name an assignment target hangs off: `a` in `a.b.c`.
@@ -614,10 +649,21 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 		}
 	case ^ast.Call_Expr:
 		name, is_name := node.expr.derived.(^ast.Ident)
-		if !is_name || (name.name != "count" && name.name != "capacity") do fail(location, "calls are count(table) and capacity(table)")
-		if len(node.args) != 1 || table_named(program, node.args[0]) == nil do fail(location, "%s takes a table", name.name)
-		if name.name == "count" do scope.touches_state = true
-		return builtin_type("int")
+		if !is_name do fail(location, "call a function by name")
+		if is_table_call(node) {
+			if len(node.args) != 1 || table_named(program, node.args[0]) == nil do fail(location, "%s takes a table", name.name)
+			if name.name == "count" do scope.touches_state = true
+			return builtin_type("int")
+		}
+		arity := math_arity(name.name)
+		if arity == 0 do fail(location, "%s is not a function: calls are count, capacity and C math", name.name)
+		if len(node.args) != arity do fail(location, "%s takes %d values", name.name, arity)
+		result := type_of(program, scope, node.args[0])
+		for argument in node.args[1:] do result = arithmetic_type(result, type_of(program, scope, argument), location)
+		if result == untyped_integer do result = untyped_float
+		scalar := result.element if result.kind == .Array else result
+		if scalar.kind != .Float do fail(location, "%s takes float or double, got %s", name.name, result.name)
+		return result
 	case ^ast.Comp_Lit:
 		if node.type == nil do fail(location, "name the type: Vector{1, 2, 3}")
 		type := resolve_type(program, scope, node.type)

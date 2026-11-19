@@ -45,10 +45,11 @@ Field :: struct {
 
 // What a proc, value or line touches. Table columns are "table.column".
 Access :: struct {
-	reads:       map[string]bool,
-	writes:      map[string]bool,
-	value_reads: map[string]bool, // on-demand values and value matches, by name
-	indexes:     bool, // some index can be out of range: an abcont
+	reads:        map[string]bool,
+	writes:       map[string]bool,
+	value_reads:  map[string]bool, // on-demand values and value matches, by name
+	direct_reads: map[string]bool, // reads made here or by called procs, not through a value
+	indexes:      bool, // some index can be out of range: an abcont
 }
 
 Check_Status :: enum {

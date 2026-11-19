@@ -1,0 +1,15 @@
+crates :: table 4
+	weight : float
+	seen   : float
+
+state row_fields
+	total := 0.0
+	scale := 2.0
+
+add_to_total ::
+	total = total + $float * scale
+
+running_total ::
+	$seen = total
+
+crates.weight |add_to_total| |running_total| crates.seen

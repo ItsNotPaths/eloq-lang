@@ -403,9 +403,8 @@ procedure_signature :: proc(program: ^Program, procedure: ^Procedure, state_type
 	for slot in ([]^Slot{procedure.input, procedure.output}) {
 		if slot != nil do fmt.sbprintf(&builder, ", %s slot_%s", c_type_name(slot.type), slot.name)
 	}
-	for name in sorted_names(cached_values(program, procedure.access)) {
-		_, type, _ := step_value(program, name)
-		fmt.sbprintf(&builder, ", %s cached_%s", c_type_name(type), name)
+	for name in sorted_names(passed_names(program, procedure.access)) {
+		fmt.sbprintf(&builder, ", %s cached_%s", c_type_name(passed_type(program, name)), name)
 	}
 	fmt.sbprintf(&builder, ")")
 	return strings.to_string(builder)
@@ -452,6 +451,30 @@ sorted_names :: proc(set: map[string]bool) -> []string {
 
 // Everything is stale at step start, since the host may have written state. A value
 // is recomputed before the first line that reads it after a write to its inputs.
+// State fields an access reads and never writes. Passed in as values, so gcc need not
+// ask whether a column write in a row loop reaches them.
+read_fields :: proc(program: ^Program, access: Access) -> map[string]bool {
+	fields: map[string]bool
+	for name in access.direct_reads {
+		field, ok := program.names[name].(^Field)
+		if ok && field.type.kind != .Table && !access.writes[name] do fields[name] = true
+	}
+	return fields
+}
+
+// What a proc takes as parameters after its slots: cached values and read-only fields.
+passed_names :: proc(program: ^Program, access: Access) -> map[string]bool {
+	names := cached_values(program, access)
+	for name in read_fields(program, access) do names[name] = true
+	return names
+}
+
+passed_type :: proc(program: ^Program, name: string) -> ^Type {
+	if field, ok := program.names[name].(^Field); ok do return field.type
+	_, type, _ := step_value(program, name)
+	return type
+}
+
 emit_lines :: proc(program: ^Program, out: Output, upper_name: string) {
 	body := strings.builder_make()
 	current: map[string]bool
@@ -478,7 +501,7 @@ emit_lines :: proc(program: ^Program, out: Output, upper_name: string) {
 }
 
 emit_procedure :: proc(program: ^Program, output: Output, procedure: ^Procedure, state_type: string) {
-	cached := cached_values(program, procedure.access)
+	cached := passed_names(program, procedure.access)
 	scope := Scope{parsed = &procedure.parsed, procedure = procedure, cached = &cached}
 	body_builder := strings.builder_make()
 	out := &body_builder
@@ -539,7 +562,15 @@ emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper
 		return
 	}
 	outer_indent := emitter.indent
-	// (hole hoist-read-fields :tags codegen) state fields a row loop only reads are loaded each row; gcc versions the loop for aliasing (row may leave its column).
+	if line.row_table != nil {
+		row_cached: map[string]bool
+		for name in cached do row_cached[name] = true
+		for name in sorted_names(read_fields(program, line.access)) {
+			row_cached[name] = true
+			fmt.sbprintf(out, "%sconst %s cached_%s = state->%s;\n", emitter.indent, c_type_name(passed_type(program, name)), name, name)
+		}
+		emitter.cached = &row_cached
+	}
 	// (hole element-copies :tags codegen) array columns move as whole-union copies; gcc does not vectorize those (`|fall|` writing .y only).
 	if line.row_table != nil {
 		fmt.sbprintf(out, "%sfor (int row = 0; row < state->%s.count; row += 1) {{\n", emitter.indent, line.row_table.name)
@@ -708,9 +739,16 @@ procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: 
 			fmt.sbprintf(&arguments, "(%s){{0}}", c_type_name(procedure.output.type))
 		}
 	}
-	for name in sorted_names(cached_values(program, procedure.access)) {
-		if line_cached[name] do fmt.sbprintf(&arguments, ", cached_%s", name)
-		else do fmt.sbprintf(&arguments, ", value_%s(state)", name)
+	for name in sorted_names(passed_names(program, procedure.access)) {
+		_, is_field := program.names[name].(^Field)
+		switch {
+		case line_cached[name]:
+			fmt.sbprintf(&arguments, ", cached_%s", name)
+		case is_field:
+			fmt.sbprintf(&arguments, ", state->%s", name)
+		case:
+			fmt.sbprintf(&arguments, ", value_%s(state)", name)
+		}
 	}
 	return fmt.aprintf("%s(%s)", procedure_c_name(procedure), strings.to_string(arguments))
 }

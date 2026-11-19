@@ -17,11 +17,13 @@ Scope :: struct {
 	row_table:     ^Type, // the table whose current row columns read from
 	row_open:      bool, // the first column read picks row_table (on-demand values)
 	access:        ^Access, // where reads go, when someone wants them
-	cached:        ^map[string]bool, // values read from a step local, not recomputed
+	cached:        ^map[string]bool, // values and fields read from a local, `cached_name`
 }
 
 note_read :: proc(scope: ^Scope, name: string) {
-	if scope.access != nil do scope.access.reads[name] = true
+	if scope.access == nil do return
+	scope.access.reads[name] = true
+	scope.access.direct_reads[name] = true
 }
 
 note_value_read :: proc(scope: ^Scope, name: string, value: Access) {
@@ -36,6 +38,7 @@ merge_access :: proc(into: ^Access, from: Access) {
 	for name in from.reads do into.reads[name] = true
 	for name in from.writes do into.writes[name] = true
 	for name in from.value_reads do into.value_reads[name] = true
+	for name in from.direct_reads do into.direct_reads[name] = true
 	into.indexes ||= from.indexes
 }
 

@@ -1,0 +1,7 @@
+state strict
+	count := 1
+
+twice ::
+	$float = float * 2
+
+count |twice| count

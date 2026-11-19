@@ -1,0 +1,37 @@
+// Constants, on-demand values, repeat.
+state values
+	height     := -2.0
+	velocity   := 4.0
+	marker     := 0
+	counter    := 0
+	weight     := 0.0
+	below_cap  := 0
+	capped     := 0
+	gravity    :: 9.8
+
+grounded :: height < 0
+fast     :: velocity > 6
+heavy    :: gravity * 2
+
+snap_to_floor ::
+	$float = 0
+
+twice ::
+	$float = float * 2
+
+set_one ::
+	$int = 1
+
+weigh ::
+	$float = heavy
+
+count_up ::
+	$int += 1
+
+height    ?grounded? |snap_to_floor| height
+marker    ?fast?     |set_one|       marker
+velocity  |twice|   velocity
+counter   ?fast?     |set_one|       counter
+weight    |weigh|    weight
+repeat 5  below_cap  ?< 3? |count_up| below_cap
+repeat 4  capped     |count_up| capped

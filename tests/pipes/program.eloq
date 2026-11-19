@@ -1,0 +1,30 @@
+// Chains, gates, and where a proc's output starts.
+state pipes
+	fuel        := 10.0
+	empty_tank  := 0.0
+	velocity    := 4.0
+	doubled     := 0.0
+	quadrupled  := 0.0
+	position    := 1.0
+	moved_twice := 0.0
+	copy        := 0.0
+	total       := 0.0
+
+burn_fuel ::
+	$fuel = fuel - 3
+
+twice ::
+	$float = float * 2
+
+move ::
+	$position = position + $velocity
+
+add_to_total ::
+	total = total + $float
+
+fuel       ?> 0? |burn_fuel| fuel
+empty_tank ¿> 0? |burn_fuel| empty_tank
+velocity   |twice| doubled |twice| quadrupled
+velocity   |move| position
+velocity   |move| |twice| moved_twice
+velocity   |add_to_total| copy

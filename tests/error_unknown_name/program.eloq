@@ -1,0 +1,6 @@
+state unknown
+	a := 1.0
+
+fast :: speed > 1
+
+a ?fast? a

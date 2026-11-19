@@ -1,0 +1,21 @@
+Vector :: [3]float
+
+state vectors
+	position    := Vector{0, 10, 0}
+	velocity    := Vector{1, 0, 0}
+	scaled      := Vector{1, 2, 3}
+	gravity     :: 10.0
+	tick_length :: 0.5
+
+apply_gravity ::
+	$velocity.y = velocity.y - gravity * tick_length
+
+move ::
+	$position = position + $velocity * tick_length
+
+halve ::
+	$Vector *= 0.5
+
+velocity |apply_gravity| velocity
+velocity |move| position
+scaled   ?!= velocity? |halve| scaled

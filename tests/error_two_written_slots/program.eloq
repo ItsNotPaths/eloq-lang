@@ -1,0 +1,9 @@
+state two
+	a := 1.0
+	b := 1.0
+
+both ::
+	$a = 1
+	$b = 2
+
+a |both| a

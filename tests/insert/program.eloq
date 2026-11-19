@@ -1,0 +1,9 @@
+insert shared.eloq
+insert shared.eloq
+insert parts
+
+state inserted
+	value := 1.0
+
+value |twice| value
+value |triple| value

@@ -1,0 +1,26 @@
+Fuel_State :: enum
+	full
+	low
+	empty
+
+Vector :: [3]float
+
+player :: struct
+	health   : float
+	position : Vector
+
+state data_types
+	fuel_state := Fuel_State.full
+	hero       : player
+	ticks      : int = 5
+	spawn      := Vector{1, 2, 3}
+
+go_low ::
+	$fuel_state = Fuel_State.low
+
+hurt ::
+	$player.health = player.health - 10
+	player.position = player.position + Vector{0, 1, 0}
+
+fuel_state ?== Fuel_State.full? |go_low| fuel_state
+hero       |hurt| hero

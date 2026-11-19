@@ -1,0 +1,7 @@
+state loops
+	a := 1.0
+
+spin ::
+	for i in 0..<3 { $a = 1 }
+
+a |spin| a

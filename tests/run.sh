@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Each tests/<case>/ holds program.eloq and either host.c, which runs the step and
 # asserts on the state, or expect-error, text that eloqc's error must contain.
+# An optional flags file holds extra eloqc arguments.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ./build.sh || exit 1
@@ -22,7 +23,8 @@ for case in tests/*/; do
 		fi
 		continue
 	fi
-	if ./eloqc "$case/program.eloq" -out:"$work/$name/program" \
+	flags=$(cat "$case/flags" 2>/dev/null)
+	if ./eloqc $flags "$case/program.eloq" -out:"$work/$name/program" \
 		&& ${CC:-cc} -std=c11 -pedantic -Wall -Wextra -Werror -I"$work/$name" "$case/host.c" "$work/$name/program.c" -lm -o "$work/$name/run" \
 		&& "$work/$name/run"; then
 		echo "ok   $name"

@@ -7,9 +7,12 @@ import "core:strings"
 main :: proc() {
 	input_path, output_path: string
 	for argument in os.args[1:] {
-		if strings.has_prefix(argument, "-out:") {
+		switch {
+		case strings.has_prefix(argument, "-out:"):
 			output_path = argument[len("-out:"):]
-		} else {
+		case argument == "--recompute-every-read":
+			recompute_every_read = true
+		case:
 			input_path = argument
 		}
 	}

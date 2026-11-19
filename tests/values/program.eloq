@@ -7,11 +7,14 @@ state values
 	weight     := 0.0
 	below_cap  := 0
 	capped     := 0
+	report_one := 0.0
+	report_two := 0.0
 	gravity    :: 9.8
 
 grounded :: height < 0
 fast     :: velocity > 6
 heavy    :: gravity * 2
+speed    :: velocity
 
 snap_to_floor ::
 	$float = 0
@@ -28,6 +31,9 @@ weigh ::
 count_up ::
 	$int += 1
 
+copy_speed ::
+	$float = speed
+
 height    ?grounded? |snap_to_floor| height
 marker    ?fast?     |set_one|       marker
 velocity  |twice|   velocity
@@ -35,3 +41,5 @@ counter   ?fast?     |set_one|       counter
 weight    |weigh|    weight
 repeat 5  below_cap  ?< 3? |count_up| below_cap
 repeat 4  capped     |count_up| capped
+report_one |copy_speed| report_one
+velocity   |twice| velocity ?speed > 10? |copy_speed| report_two

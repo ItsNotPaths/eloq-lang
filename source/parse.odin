@@ -98,6 +98,7 @@ Line :: struct {
 	location:     Location,
 	repeat_count: int, // 0 runs once
 	row_table:    ^Type, // runs once per row of this table
+	access:       Access,
 	parts:        [dynamic]Part,
 }
 

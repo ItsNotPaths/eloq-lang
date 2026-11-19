@@ -40,6 +40,13 @@ Field :: struct {
 	parsed:          Parsed,
 }
 
+// What a proc, value or line touches. Table columns are "table.column".
+Access :: struct {
+	reads:       map[string]bool,
+	writes:      map[string]bool,
+	value_reads: map[string]bool, // on-demand values and value matches, by name
+}
+
 Check_Status :: enum {
 	Unchecked,
 	Checking,
@@ -54,6 +61,7 @@ Definition :: struct {
 	type:       ^Type,
 	constant:   bool,
 	row_table:  ^Type, // set when it reads columns: one value per row
+	access:     Access,
 	status:     Check_Status,
 }
 
@@ -72,7 +80,7 @@ Procedure :: struct {
 	slots:  [dynamic]Slot,
 	input:  ^Slot, // the read-only slot
 	output: ^Slot, // the written slot
-	touches_state: bool,
+	access: Access,
 }
 
 // `name :: ?subject?` with one arm per case. Value arms make an on-demand value,
@@ -88,6 +96,7 @@ Match :: struct {
 	type:          ^Type, // value matches
 	touches_state: bool,
 	row_table:     ^Type,
+	access:        Access,
 	status:        Check_Status,
 }
 

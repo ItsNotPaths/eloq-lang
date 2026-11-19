@@ -16,6 +16,38 @@ Scope :: struct {
 	touches_state: bool,
 	row_table:     ^Type, // the table whose current row columns read from
 	row_open:      bool, // the first column read picks row_table (on-demand values)
+	access:        ^Access, // where reads go, when someone wants them
+	cached:        ^map[string]bool, // values read from a step local, not recomputed
+}
+
+note_read :: proc(scope: ^Scope, name: string) {
+	if scope.access != nil do scope.access.reads[name] = true
+}
+
+note_value_read :: proc(scope: ^Scope, name: string, value: Access) {
+	if scope.access == nil do return
+	scope.access.value_reads[name] = true
+	for read in value.reads do scope.access.reads[read] = true
+}
+
+merge_access :: proc(into: ^Access, from: Access) {
+	if into == nil do return
+	for name in from.reads do into.reads[name] = true
+	for name in from.writes do into.writes[name] = true
+	for name in from.value_reads do into.value_reads[name] = true
+}
+
+column_name :: proc(table: ^Type, column: string) -> string {
+	return strings.concatenate({table.name, ".", column})
+}
+
+// The state name a data part writes: a field, or "table.column".
+target_name :: proc(program: ^Program, expression: ^ast.Expr) -> string {
+	if selector, ok := expression.derived.(^ast.Selector_Expr); ok {
+		if table := table_named(program, selector.expr); table != nil do return column_name(table, selector.field.name)
+		return target_name(program, selector.expr)
+	}
+	return root_name(expression).name
 }
 
 // A column or a per-row value needs a row of its table.
@@ -122,7 +154,7 @@ check_definition :: proc(program: ^Program, definition: ^Definition) {
 	case .Unchecked:
 	}
 	definition.status = .Checking
-	scope := Scope{parsed = &definition.parsed, row_open = true}
+	scope := Scope{parsed = &definition.parsed, row_open = true, access = &definition.access}
 	type := type_of(program, &scope, definition.expression)
 	definition.row_table = scope.row_table
 	definition.constant = !scope.touches_state
@@ -132,7 +164,7 @@ check_definition :: proc(program: ^Program, definition: ^Definition) {
 
 check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 	location := procedure.parsed.location
-	scope := Scope{parsed = &procedure.parsed, procedure = procedure}
+	scope := Scope{parsed = &procedure.parsed, procedure = procedure, access = &procedure.access}
 	if procedure.foreign_name != "" {
 		check_foreign(program, procedure)
 		return
@@ -176,7 +208,6 @@ check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 	for statement in procedure.parsed.statements {
 		check_assignment(program, &scope, statement.derived.(^ast.Assign_Stmt))
 	}
-	procedure.touches_state = scope.touches_state
 }
 
 check_foreign :: proc(program: ^Program, procedure: ^Procedure) {
@@ -294,6 +325,7 @@ check_assignment :: proc(program: ^Program, scope: ^Scope, assignment: ^ast.Assi
 		fail(location, "can only assign to a slot or state, %s is neither", root.name)
 	}
 
+	if is_field && find_slot(scope.procedure, root.name) == nil do scope.access.writes[root.name] = true
 	target_type := type_of(program, scope, target)
 	value_type := type_of(program, scope, assignment.rhs[0])
 	if assignment.op.text != "=" {
@@ -315,9 +347,9 @@ check_line :: proc(program: ^Program, line: ^Line) {
 		last.appends = true
 		table.appends = true
 	}
-	scope := Scope{parsed = &parts[0].parsed, row_table = line.row_table}
+	scope := Scope{parsed = &parts[0].parsed, row_table = line.row_table, access = &line.access}
 	flow := default_type(type_of(program, &scope, parts[0].expression))
-	check_parts(program, parts[1:], flow, nil, line.row_table, line.location)
+	check_parts(program, parts[1:], flow, nil, line.row_table, &line.access, line.location)
 }
 
 // The table a line runs over, once per row: the one its columns or per-row values
@@ -362,16 +394,23 @@ note_row_tables :: proc(program: ^Program, part: ^Part, table: ^^Type, location:
 
 // Checks parts fed with `flow` and returns what flows out. `outer` is where output
 // lands when the parts run out, for match arms.
-check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part, row_table: ^Type, location: Location) -> ^Type {
+// `access` collects what the parts touch, nil when nobody asks.
+check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part, row_table: ^Type, access: ^Access, location: Location) -> ^Type {
 	flow := flow
 	for &part, index in parts {
-		scope := Scope{parsed = &part.parsed, flow_type = flow, row_table = row_table}
+		scope := Scope{parsed = &part.parsed, flow_type = flow, row_table = row_table, access = access}
 		switch part.kind {
 		case .Gate:
 			if gate_type := type_of(program, &scope, part.expression); gate_type.kind != .Boolean {
 				fail(location, "a gate needs a bool, got %s", gate_type.name)
 			}
 		case .Data:
+			if table := table_named(program, part.expression); table != nil && access != nil {
+				for column in table.fields do access.writes[column_name(table, column.name)] = true
+				if part.appends do access.writes[column_name(table, "added")] = true
+			} else if access != nil {
+				access.writes[target_name(program, part.expression)] = true
+			}
 			if part.appends {
 				table := table_named(program, part.expression)
 				if flow != table.row do fail(location, "a row of %s is %s, got %s", table.name, table.row.name, flow.name)
@@ -386,17 +425,20 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 			if part.name == "remove" {
 				if row_table == nil || flow != row_table.row do fail(location, "remove takes a row of the table the line runs over")
 				row_table.removes = true
+				if access != nil do access.writes[column_name(row_table, "removed")] = true
 				continue
 			}
 			switch found in program.names[part.name] {
 			case ^Procedure:
 				flow = check_call(program, found, flow, destination, row_table, location)
+				merge_access(access, found.access)
 			case ^Match:
 				if !found.has_pipes do fail(location, "%s is a value, not a proc", part.name)
 				check_match(program, found)
+				merge_access(access, found.access)
 				output: ^Type
 				for &arm in found.arms {
-					arm_output := check_parts(program, arm.parts[:], flow, destination, row_table, arm.location)
+					arm_output := check_parts(program, arm.parts[:], flow, destination, row_table, access, arm.location)
 					if output != nil && arm_output != output {
 						fail(arm.location, "arms of %s give %s and %s", part.name, output.name, arm_output.name)
 					}
@@ -453,7 +495,7 @@ check_match :: proc(program: ^Program, match: ^Match) {
 	case .Unchecked:
 	}
 	match.status = .Checking
-	scope := Scope{parsed = &match.parsed, row_open = true}
+	scope := Scope{parsed = &match.parsed, row_open = true, access = &match.access}
 	subject := default_type(type_of(program, &scope, match.subject))
 	match.subject_type = subject
 	cases: []string
@@ -483,7 +525,7 @@ check_match :: proc(program: ^Program, match: ^Match) {
 
 	if !match.has_pipes {
 		for &arm in match.arms {
-			arm_scope := Scope{parsed = &arm.parsed, row_table = scope.row_table, row_open = true}
+			arm_scope := Scope{parsed = &arm.parsed, row_table = scope.row_table, row_open = true, access = &match.access}
 			arm_type := type_of(program, &arm_scope, arm.value)
 			match.type = arm_type if match.type == nil else unify(match.type, arm_type, arm.location)
 			scope.touches_state ||= arm_scope.touches_state
@@ -606,6 +648,12 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 			}
 			fail(location, "%s has no case %s", enum_type.name, node.field.name)
 		}
+		if table := table_named(program, node.expr); table != nil && find_slot(scope.procedure, table.name) == nil {
+			use_row(scope, table, location)
+			scope.touches_state = true
+			note_read(scope, column_name(table, node.field.name))
+			return struct_field(table.row, node.field.name, location).type
+		}
 		base := type_of(program, scope, node.expr)
 		#partial switch base.kind {
 		case .Struct:
@@ -651,8 +699,12 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 		name, is_name := node.expr.derived.(^ast.Ident)
 		if !is_name do fail(location, "call a function by name")
 		if is_table_call(node) {
-			if len(node.args) != 1 || table_named(program, node.args[0]) == nil do fail(location, "%s takes a table", name.name)
-			if name.name == "count" do scope.touches_state = true
+			table := table_named(program, node.args[0]) if len(node.args) == 1 else nil
+			if table == nil do fail(location, "%s takes a table", name.name)
+			if name.name == "count" {
+				scope.touches_state = true
+				note_read(scope, column_name(table, "count"))
+			}
 			return builtin_type("int")
 		}
 		arity := math_arity(name.name)
@@ -702,18 +754,26 @@ type_of_name :: proc(program: ^Program, scope: ^Scope, name: string, location: L
 	switch found in program.names[name] {
 	case ^Field:
 		scope.touches_state = true
-		if found.type.kind != .Table do return found.type
+		if found.type.kind != .Table {
+			note_read(scope, name)
+			return found.type
+		}
 		use_row(scope, found.type, location)
+		for column in found.type.fields do note_read(scope, column_name(found.type, column.name))
 		return found.type.row
 	case ^Definition:
 		check_definition(program, found)
-		if !found.constant do scope.touches_state = true
+		if !found.constant {
+			scope.touches_state = true
+			note_value_read(scope, name, found.access)
+		}
 		if found.row_table != nil do use_row(scope, found.row_table, location)
 		return found.type
 	case ^Match:
 		if found.has_pipes do fail(location, "%s is a proc, not a value", name)
 		check_match(program, found)
 		scope.touches_state = true
+		note_value_read(scope, name, found.access)
 		if found.row_table != nil do use_row(scope, found.row_table, location)
 		return found.type
 	case ^Type, ^Procedure:

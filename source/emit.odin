@@ -2,6 +2,7 @@ package eloqc
 
 import "core:fmt"
 import "core:odin/ast"
+import "core:slice"
 import "core:strings"
 
 Output :: ^strings.Builder
@@ -38,7 +39,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	for definition in values do fmt.sbprintf(out, "%s;\n", value_signature(definition.name, definition.type, definition.row_table, state_type))
 	for match in value_matches do fmt.sbprintf(out, "%s;\n", value_signature(match.name, match.type, match.row_table, state_type))
 	for procedure in program.procedures {
-		signature := foreign_signature(procedure) if procedure.foreign_name != "" else procedure_signature(procedure, state_type)
+		signature := foreign_signature(procedure) if procedure.foreign_name != "" else procedure_signature(program, procedure, state_type)
 		fmt.sbprintf(out, "%s;\n", signature)
 	}
 	for definition in values {
@@ -68,7 +69,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	for table in tables {
 		if table.appends do fmt.sbprintf(out, "\tint %s_added = 0;\n", table.name)
 	}
-	for line, index in program.lines do emit_line(program, out, line, index + 1, upper_name)
+	emit_lines(program, out, upper_name)
 	for table in tables do emit_row_changes(out, table)
 	fmt.sbprintf(out, "\treturn %s_OK;\n}}\n", upper_name)
 
@@ -206,22 +207,94 @@ foreign_arguments :: proc(type: ^Type, path: string) -> [dynamic]Foreign_Argumen
 	return arguments
 }
 
-// Parameters: the read-only slot, then the written slot. Returns the written slot.
-procedure_signature :: proc(procedure: ^Procedure, state_type: string) -> string {
+// Parameters: the read-only slot, the written slot, then the cached values it reads.
+// Returns the written slot.
+procedure_signature :: proc(program: ^Program, procedure: ^Procedure, state_type: string) -> string {
 	builder := strings.builder_make()
 	return_type := procedure.output != nil ? c_type_name(procedure.output.type) : "void"
 	fmt.sbprintf(&builder, "static inline %s proc_%s(%s *state", return_type, procedure.name, state_type)
 	for slot in ([]^Slot{procedure.input, procedure.output}) {
 		if slot != nil do fmt.sbprintf(&builder, ", %s slot_%s", c_type_name(slot.type), slot.name)
 	}
+	for name in sorted_names(cached_values(program, procedure.access)) {
+		_, type, _ := step_value(program, name)
+		fmt.sbprintf(&builder, ", %s cached_%s", c_type_name(type), name)
+	}
 	fmt.sbprintf(&builder, ")")
 	return strings.to_string(builder)
 }
 
-emit_procedure :: proc(program: ^Program, out: Output, procedure: ^Procedure, state_type: string) {
-	scope := Scope{parsed = &procedure.parsed, procedure = procedure}
-	fmt.sbprintf(out, "\n%s {{\n", procedure_signature(procedure, state_type))
-	if !procedure.touches_state do fmt.sbprintf(out, "\t(void)state;\n")
+recompute_every_read: bool
+
+// An on-demand value that can live in a step local: not constant, not per row.
+step_value :: proc(program: ^Program, name: string) -> (access: ^Access, type: ^Type, ok: bool) {
+	#partial switch found in program.names[name] {
+	case ^Definition:
+		if !found.constant && found.row_table == nil do return &found.access, found.type, true
+	case ^Match:
+		if !found.has_pipes && found.row_table == nil do return &found.access, found.type, true
+	}
+	return nil, nil, false
+}
+
+overlaps :: proc(reads, writes: map[string]bool) -> bool {
+	for name in reads {
+		if writes[name] do return true
+	}
+	return false
+}
+
+// The values a line or proc reads from step locals: those it does not change itself.
+// A value whose inputs it writes is recomputed on each read there.
+cached_values :: proc(program: ^Program, access: Access) -> map[string]bool {
+	cached: map[string]bool
+	if recompute_every_read do return cached
+	for name in access.value_reads {
+		value, _, ok := step_value(program, name)
+		if ok && !overlaps(value.reads, access.writes) do cached[name] = true
+	}
+	return cached
+}
+
+sorted_names :: proc(set: map[string]bool) -> []string {
+	names: [dynamic]string
+	for name in set do append(&names, name)
+	slice.sort(names[:])
+	return names[:]
+}
+
+// Everything is stale at step start, since the host may have written state. A value
+// is recomputed before the first line that reads it after a write to its inputs.
+emit_lines :: proc(program: ^Program, out: Output, upper_name: string) {
+	body := strings.builder_make()
+	current: map[string]bool
+	locals: map[string]bool
+	for line, index in program.lines {
+		cached := cached_values(program, line.access)
+		for name in sorted_names(cached) {
+			if current[name] do continue
+			current[name] = true
+			locals[name] = true
+			fmt.sbprintf(&body, "\tcached_%s = value_%s(state);\n", name, name)
+		}
+		emit_line(program, &body, line, index + 1, upper_name, &cached)
+		for name in sorted_names(current) {
+			value, _, _ := step_value(program, name)
+			if overlaps(value.reads, line.access.writes) do delete_key(&current, name)
+		}
+	}
+	for name in sorted_names(locals) {
+		_, type, _ := step_value(program, name)
+		fmt.sbprintf(out, "\t%s cached_%s;\n", c_type_name(type), name)
+	}
+	strings.write_string(out, strings.to_string(body))
+}
+
+emit_procedure :: proc(program: ^Program, output: Output, procedure: ^Procedure, state_type: string) {
+	cached := cached_values(program, procedure.access)
+	scope := Scope{parsed = &procedure.parsed, procedure = procedure, cached = &cached}
+	body_builder := strings.builder_make()
+	out := &body_builder
 	for statement in procedure.parsed.statements {
 		assignment := statement.derived.(^ast.Assign_Stmt)
 		target := assignment.lhs[0]
@@ -243,7 +316,11 @@ emit_procedure :: proc(program: ^Program, out: Output, procedure: ^Procedure, st
 		fmt.sbprintf(out, ";\n")
 	}
 	if procedure.output != nil do fmt.sbprintf(out, "\treturn slot_%s;\n", procedure.output.name)
-	fmt.sbprintf(out, "}}\n")
+	body := strings.to_string(body_builder)
+
+	// Cached values can leave a proc with no use of state at all.
+	uses_state := strings.contains(body, "state->") || strings.contains(body, "(state")
+	fmt.sbprintf(output, "\n%s {{\n%s%s}}\n", procedure_signature(program, procedure, state_type), "" if uses_state else "\t(void)state;\n", body)
 }
 
 Line_Emitter :: struct {
@@ -255,12 +332,13 @@ Line_Emitter :: struct {
 	has_gate:   bool,
 	row_table:  ^Type,
 	upper_name: string,
+	cached:     ^map[string]bool,
 }
 
 // A line over a table is a loop over its rows. A gate skips to the next row.
-emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string) {
+emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string, cached: ^map[string]bool) {
 	parts := line.parts[:]
-	emitter := Line_Emitter{program = program, out = out, number = number, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name}
+	emitter := Line_Emitter{program = program, out = out, number = number, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
 
 	fmt.sbprintf(out, "\t{{ // %s:%d\n", line.location.path, line.location.line)
 	outer_indent := emitter.indent
@@ -273,7 +351,7 @@ emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper
 		fmt.sbprintf(out, "%sfor (int pass = 0; pass < %d; pass += 1) {{\n", emitter.indent, line.repeat_count)
 		emitter.indent = strings.concatenate({emitter.indent, "\t"})
 	}
-	scope := Scope{parsed = &parts[0].parsed, row_table = line.row_table}
+	scope := Scope{parsed = &parts[0].parsed, row_table = line.row_table, cached = cached}
 	flow := default_type(type_of(program, &scope, parts[0].expression))
 	fmt.sbprintf(out, "%s%s flow_1 = ", emitter.indent, c_type_name(flow))
 	emit_expression(program, &scope, out, parts[0].expression, flow)
@@ -291,7 +369,7 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 	program, out, indent := emitter.program, emitter.out, emitter.indent
 	flow, flow_variable := flow, flow_variable
 	for &part, index in parts {
-		scope := Scope{parsed = &part.parsed, flow_type = flow, flow_variable = flow_variable, row_table = emitter.row_table}
+		scope := Scope{parsed = &part.parsed, flow_type = flow, flow_variable = flow_variable, row_table = emitter.row_table, cached = emitter.cached}
 		switch part.kind {
 		case .Gate:
 			fmt.sbprintf(out, "%sif (!(", indent)
@@ -320,7 +398,7 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 			}
 			#partial switch found in program.names[part.name] {
 			case ^Procedure:
-				call := procedure_call(program, found, flow_variable, destination, emitter.row_table)
+				call := procedure_call(program, found, flow_variable, destination, emitter.row_table, emitter.cached)
 				if found.output == nil {
 					fmt.sbprintf(out, "%s%s;\n", indent, call)
 					continue
@@ -332,10 +410,10 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 					fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s_ABEND_BAD_CASE;\n", indent, flow_variable, len(flow.cases), emitter.upper_name)
 				}
 			case ^Match:
-				output := check_parts(program, found.arms[0].parts[:], flow, destination, emitter.row_table, found.location)
+				output := check_parts(program, found.arms[0].parts[:], flow, destination, emitter.row_table, nil, found.location)
 				result := next_flow(emitter)
 				fmt.sbprintf(out, "%s%s %s;\n", indent, c_type_name(output), result)
-				emit_switch_open(emitter.program, out, found, indent)
+				emit_switch_open(emitter.program, out, found, indent, emitter.cached)
 				emitter.indent = strings.concatenate({indent, "\t"})
 				for &arm, arm_index in found.arms {
 					fmt.sbprintf(out, "%s%s {{\n", indent, case_labels(found, arm_index))
@@ -356,7 +434,7 @@ next_flow :: proc(emitter: ^Line_Emitter) -> string {
 	return fmt.aprintf("flow_%d", emitter.flow_count)
 }
 
-procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: string, destination: ^Part, row_table: ^Type) -> string {
+procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: string, destination: ^Part, row_table: ^Type, line_cached: ^map[string]bool) -> string {
 	if procedure.foreign_name != "" {
 		values: [dynamic]string
 		for argument in foreign_arguments(procedure.input.type, "") {
@@ -375,11 +453,15 @@ procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: 
 			fmt.sbprintf(&arguments, "(%s){{0}}", c_type_name(procedure.output.type))
 		}
 	}
+	for name in sorted_names(cached_values(program, procedure.access)) {
+		if line_cached[name] do fmt.sbprintf(&arguments, ", cached_%s", name)
+		else do fmt.sbprintf(&arguments, ", value_%s(state)", name)
+	}
 	return fmt.aprintf("proc_%s(%s)", procedure.name, strings.to_string(arguments))
 }
 
-emit_switch_open :: proc(program: ^Program, out: Output, match: ^Match, indent: string) {
-	scope := Scope{parsed = &match.parsed, row_table = match.row_table}
+emit_switch_open :: proc(program: ^Program, out: Output, match: ^Match, indent: string, cached: ^map[string]bool = nil) {
+	scope := Scope{parsed = &match.parsed, row_table = match.row_table, cached = cached}
 	fmt.sbprintf(out, "%sswitch ((int)(", indent)
 	emit_expression(program, &scope, out, match.subject, nil)
 	fmt.sbprintf(out, ")) {{\n")
@@ -607,6 +689,7 @@ c_name :: proc(program: ^Program, scope: ^Scope, name: string) -> string {
 	case find_slot(scope.procedure, name) != nil:
 		return strings.concatenate({"slot_", name})
 	}
+	if scope.cached != nil && scope.cached[name] do return strings.concatenate({"cached_", name})
 	#partial switch found in program.names[name] {
 	case ^Definition:
 		return fmt.aprintf("value_%s(state%s)", name, ", row" if found.row_table != nil else "")

@@ -6,6 +6,8 @@ import "core:strings"
 
 main :: proc() {
 	input_path, output_path: string
+	// (hole report-flag :tags tooling) no report flags (--coercions, read and write sets, index-write order lint); --report turns on all.
+	// (hole formatter :tags tooling) no formatter: tabs, ¿ added or stripped.
 	for argument in os.args[1:] {
 		switch {
 		case strings.has_prefix(argument, "-out:"):

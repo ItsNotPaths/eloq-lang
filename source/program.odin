@@ -137,6 +137,7 @@ builtin_type :: proc(name: string) -> ^Type {
 	return builtin_types[name]
 }
 
+// (hole opaque-strings :tags types) no built-in string {data, len}, no char type, no == on arrays.
 BUILTIN_TYPES :: [?]struct {
 	name: string,
 	kind: Type_Kind,
@@ -189,6 +190,7 @@ build_program :: proc(items: []Item) -> Program {
 
 add_name :: proc(program: ^Program, name: string, value: Name, location: Location) {
 	if name == "remove" || name == "count" || name == "capacity" do fail(location, "%s is built in", name)
+	// (hole proc-overloading :tags types) one proc per name; procs should share a name when input slot types differ.
 	if name in program.names do fail(location, "%s is already defined", name)
 	program.names[name] = value
 }

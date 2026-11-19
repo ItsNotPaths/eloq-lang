@@ -113,6 +113,7 @@ emit_type :: proc(out: Output, type: ^Type, emitted: ^map[^Type]bool) {
 	}
 }
 
+// (hole abend-detail :tags abends :needs abcont) no Abend_Detail in the state: line, row, value, abcont_count.
 ABENDS :: [?]string{"BAD_CASE", "BAD_COUNT", "TABLE_FULL"}
 
 state_tables :: proc(program: ^Program) -> [dynamic]^Type {
@@ -209,6 +210,7 @@ foreign_arguments :: proc(type: ^Type, path: string) -> [dynamic]Foreign_Argumen
 
 // Parameters: the read-only slot, the written slot, then the cached values it reads.
 // Returns the written slot.
+// (hole restrict-pointers :tags codegen) no restrict on pointers whose arrays the write sets prove apart.
 procedure_signature :: proc(program: ^Program, procedure: ^Procedure, state_type: string) -> string {
 	builder := strings.builder_make()
 	return_type := procedure.output != nil ? c_type_name(procedure.output.type) : "void"
@@ -336,6 +338,8 @@ Line_Emitter :: struct {
 }
 
 // A line over a table is a loop over its rows. A gate skips to the next row.
+// (hole intermediate-logging :tags tooling :sev polish) no way to log every named intermediate of a line.
+// (hole parallel-lines :tags codegen) lines with disjoint write sets still run one after another.
 emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string, cached: ^map[string]bool) {
 	parts := line.parts[:]
 	emitter := Line_Emitter{program = program, out = out, number = number, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
@@ -380,9 +384,11 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 			table := table_named(program, part.expression)
 			switch {
 			case part.appends:
+				// (hole abcont :tags (tables abends)) TABLE_FULL is an abend; should be an abcont that drops the add and finishes the step.
 				fmt.sbprintf(out, "%sif (state->%s.count + %s_added >= %d) return %s_ABEND_TABLE_FULL;\n", indent, table.name, table.name, table.count, emitter.upper_name)
 				emit_row_store(out, indent, table, fmt.aprintf("state->%s.count + %s_added", table.name, table.name), flow_variable)
 				fmt.sbprintf(out, "%s%s_added += 1;\n", indent, table.name)
+			// (hole remove-write-back :tags tables :sev polish) |remove| shells still stores the unchanged row back.
 			case table != nil:
 				emit_row_store(out, indent, table, "row", flow_variable)
 			case:
@@ -406,6 +412,7 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 				flow = found.output.type
 				flow_variable = next_flow(emitter)
 				fmt.sbprintf(out, "%s%s %s = %s;\n", indent, c_type_name(flow), flow_variable, call)
+				// (hole abend-removed-flags :tags (tables abends)) an abend mid-step leaves removed flags set; it should clear them before it returns.
 				if found.foreign_name != "" && flow.kind == .Enum {
 					fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s_ABEND_BAD_CASE;\n", indent, flow_variable, len(flow.cases), emitter.upper_name)
 				}
@@ -631,6 +638,7 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 		name := node.expr.derived.(^ast.Ident).name
 		if is_table_call(node) {
 			table := table_named(program, node.args[0])
+			// (hole pending-count :tags tables) count() and capacity() are calls; should be shells.count and shells.added fields, capacity a plain constant.
 			if name == "count" do fmt.sbprintf(out, "state->%s.count", table.name)
 			else do fmt.sbprintf(out, "%d", table.count)
 			return

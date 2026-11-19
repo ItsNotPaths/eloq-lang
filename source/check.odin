@@ -188,6 +188,7 @@ check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 			complete_type(program, found)
 			slot.type = found
 		case ^Field:
+			// (hole whole-array-procs :tags tables) a slot on a table is one row; a foreign proc on a table should get Table * once.
 			slot.type = found.type.row if found.type.kind == .Table else found.type
 		case nil:
 			slot.type = column_type(program, slot.name, location)
@@ -554,6 +555,7 @@ default_type :: proc(type: ^Type) -> ^Type {
 
 
 // Whether a value of type `source` can be stored in `target`.
+// (hole coercion :tags types) strict; every coercion should be automatic by C rules, both widening and narrowing.
 accepts :: proc(target, source: ^Type) -> bool {
 	if target == source do return true
 	if !source.untyped do return false
@@ -737,6 +739,7 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 		}
 		return type
 	}
+	// (hole index-syntax :tags types :needs abcont) no enemies[target].position reads or writes; out of range should be an abcont.
 	fail(location, "not allowed in eloq: %v", reflect.union_variant_typeid(expression.derived))
 }
 

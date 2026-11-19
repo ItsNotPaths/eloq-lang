@@ -6,6 +6,7 @@ Vector4 :: [4]float
 pi  :: 3.14159265358979323846
 tau :: 6.28318530717958647692
 
+// (hole vector2-procs :tags math :sev polish :needs proc-overloading) length and normalize take Vector3 only; no Vector2 or Vector4 versions.
 length ::
 	$float = sqrt($Vector3.x * Vector3.x + Vector3.y * Vector3.y + Vector3.z * Vector3.z)
 

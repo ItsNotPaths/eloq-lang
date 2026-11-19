@@ -177,7 +177,7 @@ row_literal :: proc(table: ^Type, index: string) -> string {
 	builder := strings.builder_make()
 	fmt.sbprintf(&builder, "(%s){{", table.row.name)
 	for column, position in table.fields {
-		fmt.sbprintf(&builder, "%s.%s = state->%s.%s[%s]", position == 0 ? " " : ", ", column.name, table.name, column.name, index)
+		fmt.sbprintf(&builder, "%s.%s = %s", position == 0 ? " " : ", ", column.name, element_copy(column.type, fmt.aprintf("state->%s.%s[%s]", table.name, column.name, index)))
 	}
 	fmt.sbprintf(&builder, " }}")
 	return strings.to_string(builder)
@@ -185,8 +185,37 @@ row_literal :: proc(table: ^Type, index: string) -> string {
 
 emit_row_store :: proc(out: Output, indent: string, table: ^Type, index: string, flow_variable: string) {
 	for column in table.fields {
-		fmt.sbprintf(out, "%sstate->%s.%s[%s] = %s.%s;\n", indent, table.name, column.name, index, flow_variable, column.name)
+		target := fmt.aprintf("state->%s.%s[%s]", table.name, column.name, index)
+		emit_store(out, indent, target, strings.concatenate({flow_variable, ".", column.name}), column.type)
 	}
+}
+
+// Arrays go element by element: gcc does not vectorize whole-union copies.
+emit_store :: proc(out: Output, indent: string, target, value: string, type: ^Type) {
+	if type.kind != .Array {
+		fmt.sbprintf(out, "%s%s = %s;\n", indent, target, value)
+		return
+	}
+	for index in 0 ..< type.count {
+		fmt.sbprintf(out, "%s%s%s = %s%s;\n", indent, target, element_access(type, index), value, element_access(type, index))
+	}
+}
+
+// Element by element, for the same reason as emit_store.
+element_copy :: proc(type: ^Type, value: string) -> string {
+	if type.kind != .Array do return value
+	elements: [dynamic]string
+	for index in 0 ..< type.count do append(&elements, strings.concatenate({value, element_access(type, index)}))
+	return fmt.aprintf("(%s){{{{ %s }}}}", c_type_name(type), strings.join(elements[:], ", "))
+}
+
+// A column of the current row, or of a row by index.
+reads_column :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> bool {
+	selector, ok := expression.derived.(^ast.Selector_Expr)
+	if !ok do return false
+	if indexed, is_indexed := selector.expr.derived.(^ast.Index_Expr); is_indexed do return is_table_index(program, scope, indexed)
+	table := table_named(program, selector.expr)
+	return table != nil && find_slot(scope.procedure, table.name) == nil && !is_table_count(selector.field.name)
 }
 
 c_type_name :: proc(type: ^Type) -> string {
@@ -571,7 +600,6 @@ emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper
 		}
 		emitter.cached = &row_cached
 	}
-	// (hole element-copies :tags codegen) array columns move as whole-union copies; gcc does not vectorize those (`|fall|` writing .y only).
 	if line.row_table != nil {
 		fmt.sbprintf(out, "%sfor (int row = 0; row < state->%s.count; row += 1) {{\n", emitter.indent, line.row_table.name)
 		emitter.indent = strings.concatenate({emitter.indent, "\t"})
@@ -633,9 +661,12 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 			case table != nil:
 				emit_row_store(out, indent, table, "row", flow_variable)
 			case:
-				fmt.sbprintf(out, "%s", indent)
-				emit_expression(program, &scope, out, part.expression, nil)
-				fmt.sbprintf(out, " = %s;\n", flow_variable)
+				target_type := default_type(type_of(program, &scope, part.expression))
+				for element in 0 ..< (target_type.count if target_type.kind == .Array else 1) {
+					fmt.sbprintf(out, "%s", indent)
+					emit_expression(program, &scope, out, part.expression, nil, element if target_type.kind == .Array else -1)
+					fmt.sbprintf(out, " = %s%s;\n", flow_variable, element_access(target_type, element) if target_type.kind == .Array else "")
+				}
 			}
 		case .Procedure:
 			destination := destination_of(parts[index + 1:], outer)
@@ -850,7 +881,7 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 	if type.untyped && want != nil do type = want
 	type = default_type(type)
 
-	if type.kind == .Array && element < 0 && distributes(expression) {
+	if type.kind == .Array && element < 0 && (distributes(expression) || reads_column(program, scope, expression)) {
 		fmt.sbprintf(out, "(%s){{{{", c_type_name(type))
 		for index in 0 ..< type.count {
 			if index > 0 do fmt.sbprintf(out, ", ")
@@ -984,9 +1015,8 @@ emit_element :: proc(out: Output, type: ^Type, element: int) {
 }
 
 // `.y` where the array has element names, `.elements[5]` past them.
+// Always `.elements[i]`: gcc vectorizes those, not the union's `.x .y .z` names.
 element_access :: proc(type: ^Type, index: int) -> string {
-	letters := ELEMENT_NAMES[0]
-	if type.count <= len(letters) do return fmt.aprintf(".%c", letters[index])
 	return fmt.aprintf(".elements[%d]", index)
 }
 

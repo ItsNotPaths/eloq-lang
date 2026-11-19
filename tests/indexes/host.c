@@ -19,8 +19,8 @@ int main(void) {
 	state.slot = 2;
 
 	assert(indexes(&state) == 1);
-	Indexes_Abend_Entry entry = state.abends.entries[0];
-	assert(entry.code == INDEXES_ABCONT_BAD_INDEX && entry.value == 5 && entry.line == 22 && entry.row == 1);
+	Eloq_Entry entry = state.abends.entries[0];
+	assert(entry.code == ELOQ_ABCONT_BAD_INDEX && entry.value == 5 && entry.line == 22 && entry.row == 1);
 	assert(state.aim.y == 2.0f);                                            // read by index in a line
 	assert(state.enemies.health[0] == 6.0f && state.enemies.health[1] == 19.0f);   // the bad row is skipped
 	assert(state.first_health == 6.0f);   // a write by index makes values that read the column stale

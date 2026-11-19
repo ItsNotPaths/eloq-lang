@@ -26,6 +26,6 @@ int main(void) {
 	assert(state.shells.count == 4);   // a gate on room drops the add
 
 	state.shells.count = 9;
-	assert(launch_site(&state) == 1 && state.abends.entries[0].code == LAUNCH_SITE_ABEND_BAD_COUNT);
+	assert(launch_site(&state) == 1 && state.abends.entries[0].code == ELOQ_ABEND_BAD_COUNT);
 	return 0;
 }

@@ -1,0 +1,2 @@
+tests/abend_pending/program.eloq:24: abcont TABLE_FULL (value 0)
+tests/abend_pending/program.eloq:25: abend BAD_CASE (value 9)

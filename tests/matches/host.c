@@ -12,7 +12,7 @@ int main(void) {
 
 	matches_init(&state);
 	state.fuel_state = 7;
-	assert(matches(&state) == 1 && state.abends.entries[0].code == MATCHES_ABEND_BAD_CASE);
+	assert(matches(&state) == 1 && state.abends.entries[0].code == ELOQ_ABEND_BAD_CASE);
 	assert(state.thrust_now == 0.0f);    // nothing ran
 	return 0;
 }

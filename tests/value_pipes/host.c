@@ -13,7 +13,7 @@ int main(void) {
 	state.target = 9;
 	state.distance = 0;
 	assert(value_pipes(&state) == 2);
-	assert(state.abends.entries[0].code == VALUE_PIPES_ABCONT_BAD_INDEX && state.abends.entries[0].value == 9);
+	assert(state.abends.entries[0].code == ELOQ_ABCONT_BAD_INDEX && state.abends.entries[0].value == 9);
 	assert(state.distance == 0.0f);   // the line skips
 	return 0;
 }

@@ -9,25 +9,17 @@ Output :: ^strings.Builder
 
 emit_program :: proc(program: ^Program, header_name: string) -> (header: string, source: string) {
 	state_type := strings.to_ada_case(program.state_name)
-	abend_type := strings.concatenate({state_type, "_Abend"})
-	upper_name := strings.to_upper(program.state_name)
 
 	header_builder := strings.builder_make()
 	out := &header_builder
 	guard := strings.to_upper(strings.concatenate({header_name, "_H"}))
-	fmt.sbprintf(out, "#ifndef %s\n#define %s\n\n#include <stdbool.h>\n#include <stdint.h>\n#include <stddef.h>\n\n", guard, guard)
-	fmt.sbprintf(out, "#ifndef ELOQ_STRING\n#define ELOQ_STRING\ntypedef struct {{ const char *data; int len; }} String;\n#endif\n\n")
+	fmt.sbprintf(out, "#ifndef %s\n#define %s\n\n#include <stdbool.h>\n#include <stdint.h>\n#include <stddef.h>\n#include \"eloq.h\"\n\n", guard, guard)
 	emitted: map[^Type]bool
 	for type in program.types do emit_type(out, type, &emitted)
 	for field in program.fields do emit_type(out, field.type, &emitted)
-	fmt.sbprintf(out, "typedef enum {{\n")
-	for code in CODES do fmt.sbprintf(out, "\t%s_%s,\n", upper_name, code)
-	fmt.sbprintf(out, "}} %s;\n\n", abend_type)
-	fmt.sbprintf(out, "typedef struct {{\n\t%s code;\n\tint line;\n\tint row;\n\tint value;\n}} %s_Entry;\n\n", abend_type, abend_type)
-	fmt.sbprintf(out, "typedef struct {{\n\t%s_Entry entries[%d];\n\tint count;\n\tint dropped;\n\tbool stop_on_abcont;\n}} %ss;\n\n", abend_type, ABEND_CAPACITY, abend_type)
 	fmt.sbprintf(out, "typedef struct {{\n")
 	for field in program.fields do fmt.sbprintf(out, "\t%s %s;\n", c_type_name(field.type), field.name)
-	fmt.sbprintf(out, "\t%ss abends;\n}} %s;\n\n", abend_type, state_type)
+	fmt.sbprintf(out, "\tEloq_Abends abends;\n}} %s;\n\n", state_type)
 	fmt.sbprintf(out, "void %s_init(%s *restrict state);\n", program.state_name, state_type)
 	fmt.sbprintf(out, "int %s(%s *restrict state);\n\n#endif\n", program.state_name, state_type)
 
@@ -35,7 +27,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	out = &source_builder
 	fmt.sbprintf(out, "#include <math.h>\n#include <string.h>\n%s#include \"%s.h\"\n\n", "#include <stdio.h>\n" if reports.log_intermediates else "", header_name)
 	tables := state_tables(program)
-	emit_abend_procs(out, tables, abend_type, state_type)
+	emit_abend_procs(out, tables, state_type)
 	values := on_demand_values(program)
 	value_matches: [dynamic]^Match
 	for match in program.matches {
@@ -80,10 +72,10 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	fmt.sbprintf(out, "}}\n\n")
 	fmt.sbprintf(out, "int %s(%s *restrict state) {{\n\tstate->abends.count = 0;\n\tstate->abends.dropped = 0;\n", program.state_name, state_type)
 	for field in program.fields {
-		emit_state_checks(out, field.type, fmt.aprintf("state->%s", field.name), upper_name, field.location.line, "-1", 1)
+		emit_state_checks(out, field.type, fmt.aprintf("state->%s", field.name), field.location, "-1", 1)
 	}
 	for table in tables do fmt.sbprintf(out, "\tstate->%s.added = 0;\n", table.name)
-	emit_lines(program, out, upper_name)
+	emit_lines(program, out)
 	for table in tables do emit_row_changes(out, table)
 	fmt.sbprintf(out, "\treturn state->abends.count + state->abends.dropped;\n}}\n")
 
@@ -127,26 +119,23 @@ emit_type :: proc(out: Output, type: ^Type, emitted: ^map[^Type]bool) {
 	}
 }
 
-CODES :: [?]string{"ABEND_BAD_CASE", "ABEND_BAD_COUNT", "ABCONT_TABLE_FULL", "ABCONT_BAD_INDEX"}
-ABEND_CAPACITY :: 16
-
 // Codes land in state->abends in the order they happen. A stop drops pending removes.
-emit_abend_procs :: proc(out: Output, tables: [dynamic]^Type, abend_type, state_type: string) {
-	parameters := fmt.aprintf("%s *restrict state, %s code, int line, int row, int value", state_type, abend_type)
+emit_abend_procs :: proc(out: Output, tables: [dynamic]^Type, state_type: string) {
+	parameters := fmt.aprintf("%s *restrict state, Eloq_Code code, const char *file, int line, int row, int value", state_type)
 	fmt.sbprintf(out, "static inline void record_abend(%s) {{\n", parameters)
-	fmt.sbprintf(out, "\tif (state->abends.count == %d) {{\n\t\tstate->abends.dropped += 1;\n\t\treturn;\n\t}}\n", ABEND_CAPACITY)
-	fmt.sbprintf(out, "\tstate->abends.entries[state->abends.count++] = (%s_Entry){{code, line, row, value}};\n}}\n\n", abend_type)
+	fmt.sbprintf(out, "\tif (state->abends.count == ELOQ_ABEND_CAPACITY) {{\n\t\tstate->abends.dropped += 1;\n\t\treturn;\n\t}}\n")
+	fmt.sbprintf(out, "\tstate->abends.entries[state->abends.count++] = (Eloq_Entry){{code, file, line, row, value}};\n}}\n\n")
 	fmt.sbprintf(out, "static inline int stop_step(%s *restrict state) {{\n", state_type)
 	for table in tables {
 		if table.appends do fmt.sbprintf(out, "\tstate->%s.added = 0;\n", table.name)
 		if table.removes do fmt.sbprintf(out, "\tmemset(state->%s.removed, 0, sizeof state->%s.removed);\n", table.name, table.name)
 	}
 	fmt.sbprintf(out, "\treturn state->abends.count + state->abends.dropped;\n}}\n\n")
-	fmt.sbprintf(out, "static inline int abend_step(%s) {{\n\trecord_abend(state, code, line, row, value);\n\treturn stop_step(state);\n}}\n\n", parameters)
+	fmt.sbprintf(out, "static inline int abend_step(%s) {{\n\trecord_abend(state, code, file, line, row, value);\n\treturn stop_step(state);\n}}\n\n", parameters)
 }
 
-abend_call :: proc(procedure, upper_name, code: string, line: int, row, value: string) -> string {
-	return fmt.aprintf("%s(state, %s_%s, %d, %s, %s)", procedure, upper_name, code, line, row, value)
+abend_call :: proc(procedure, code: string, location: Location, row, value: string) -> string {
+	return fmt.aprintf("%s(state, ELOQ_%s, \"%s\", %d, %s, %s)", procedure, code, location.path, location.line, row, value)
 }
 
 state_tables :: proc(program: ^Program) -> [dynamic]^Type {
@@ -287,9 +276,9 @@ zero_return :: proc(type: ^Type) -> string {
 }
 
 Index_Check :: struct {
-	index: string,
-	bound: string,
-	line:  int,
+	index:    string,
+	bound:    string,
+	location: Location,
 }
 
 // One bounds check per index, before the statement that holds it, so a bad index
@@ -302,7 +291,7 @@ emit_index_checks :: proc(program: ^Program, scope: ^Scope, out: Output, indent:
 		key := strings.concatenate({check.index, " < ", check.bound})
 		if emitted[key] do continue
 		emitted[key] = true
-		call := abend_call("record_abend", strings.to_upper(program.state_name), "ABCONT_BAD_INDEX", check.line, row, fmt.aprintf("(int)(%s)", check.index))
+		call := abend_call("record_abend", "ABCONT_BAD_INDEX", check.location, row, fmt.aprintf("(int)(%s)", check.index))
 		fmt.sbprintf(out, "%sif ((unsigned)(%s) >= (unsigned)(%s)) {{\n%s\t%s;\n%s\t%s\n%s}}\n", indent, check.index, check.bound, indent, call, indent, on_fail, indent)
 	}
 	return len(checks) > 0
@@ -323,7 +312,7 @@ gather_index_checks :: proc(program: ^Program, scope: ^Scope, expression: ^ast.E
 		} else {
 			bound = fmt.aprintf("%d", type_of(program, scope, node.expr).count)
 		}
-		append(checks, Index_Check{index_text(program, scope, node.index), bound, node_location(scope, expression).line})
+		append(checks, Index_Check{index_text(program, scope, node.index), bound, node_location(scope, expression)})
 	case ^ast.Selector_Expr:
 		gather_index_checks(program, scope, node.expr, checks)
 	case ^ast.Paren_Expr:
@@ -504,7 +493,7 @@ passed_type :: proc(program: ^Program, name: string) -> ^Type {
 	return type
 }
 
-emit_lines :: proc(program: ^Program, out: Output, upper_name: string) {
+emit_lines :: proc(program: ^Program, out: Output) {
 	body := strings.builder_make()
 	current: map[string]bool
 	locals: map[string]bool
@@ -516,7 +505,7 @@ emit_lines :: proc(program: ^Program, out: Output, upper_name: string) {
 			locals[name] = true
 			fmt.sbprintf(&body, "\tcached_%s = value_%s(state);\n", name, name)
 		}
-		emit_line(program, &body, line, index + 1, upper_name, &cached)
+		emit_line(program, &body, line, index + 1, &cached)
 		for name in sorted_names(current) {
 			value, _, _ := step_value(program, name)
 			if overlaps(value.reads, line.access.writes) do delete_key(&current, name)
@@ -575,14 +564,13 @@ Line_Emitter :: struct {
 	flow_is_row:  bool, // the line starts with its own table's row
 	has_line_end: bool,
 	row_table:    ^Type,
-	upper_name:   string,
 	cached:       ^map[string]bool,
 }
 
 // A line over a table is a loop over its rows. A gate skips to the next row.
-emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string, cached: ^map[string]bool) {
+emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, cached: ^map[string]bool) {
 	parts := line.parts[:]
-	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, location = line.location, flow_is_row = line.row_table != nil && table_named(program, parts[0].expression) == line.row_table, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
+	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, location = line.location, flow_is_row = line.row_table != nil && table_named(program, parts[0].expression) == line.row_table, indent = "\t\t", flow_count = 1, row_table = line.row_table, cached = cached}
 
 	fmt.sbprintf(out, "\t{{ // %s:%d\n", line.location.path, line.location.line)
 	if table := table_flow(program, parts); table != nil {
@@ -694,7 +682,7 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 				flow_variable = next_flow(emitter)
 				fmt.sbprintf(out, "%s%s %s = %s;\n", indent, c_type_name(flow), flow_variable, call)
 				if procedure.foreign_name != "" && flow.kind == .Enum {
-					call := abend_call("abend_step", emitter.upper_name, "ABEND_BAD_CASE", emitter.source_line, emitter_row(emitter), fmt.aprintf("(int)%s", flow_variable))
+					call := abend_call("abend_step", "ABEND_BAD_CASE", emitter.location, emitter_row(emitter), fmt.aprintf("(int)%s", flow_variable))
 					fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s;\n", indent, flow_variable, len(flow.cases), call)
 				}
 			case ^Match:
@@ -721,7 +709,7 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 
 // An abcont skips the rest of the line for this row, or stops the step if the host asks.
 emit_abcont :: proc(emitter: ^Line_Emitter, condition, abcont, value: string) {
-	call := abend_call("record_abend", emitter.upper_name, strings.concatenate({"ABCONT_", abcont}), emitter.source_line, emitter_row(emitter), value)
+	call := abend_call("record_abend", strings.concatenate({"ABCONT_", abcont}), emitter.location, emitter_row(emitter), value)
 	fmt.sbprintf(emitter.out, "%sif (%s) {{\n%s\t%s;\n%s\t%s\n%s}}\n", emitter.indent, condition, emitter.indent, call, emitter.indent, line_skip(emitter), emitter.indent)
 	emitter.has_line_end = true
 }
@@ -884,20 +872,20 @@ emit_value_match :: proc(program: ^Program, out: Output, match: ^Match, state_ty
 }
 
 // A host can write any number into an enum or a table count. Catch it before anything reads it.
-emit_state_checks :: proc(out: Output, type: ^Type, path: string, upper_name: string, line: int, row: string, depth: int) {
+emit_state_checks :: proc(out: Output, type: ^Type, path: string, location: Location, row: string, depth: int) {
 	indent := strings.repeat("\t", depth)
 	if type.kind == .Table {
-		call := abend_call("abend_step", upper_name, "ABEND_BAD_COUNT", line, row, fmt.aprintf("%s.count", path))
+		call := abend_call("abend_step", "ABEND_BAD_COUNT", location, row, fmt.aprintf("%s.count", path))
 		fmt.sbprintf(out, "%sif ((unsigned)%s.count > %d) return %s;\n", indent, path, type.count, call)
 	}
 	if !holds_enum(type) do return
 	#partial switch type.kind {
 	case .Enum:
-		call := abend_call("abend_step", upper_name, "ABEND_BAD_CASE", line, row, fmt.aprintf("(int)%s", path))
+		call := abend_call("abend_step", "ABEND_BAD_CASE", location, row, fmt.aprintf("(int)%s", path))
 		fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s;\n", indent, path, len(type.cases), call)
 	case .Struct:
 		for field in type.fields {
-			emit_state_checks(out, field.type, fmt.aprintf("%s.%s", path, field.name), upper_name, line, row, depth)
+			emit_state_checks(out, field.type, fmt.aprintf("%s.%s", path, field.name), location, row, depth)
 		}
 	case .Array, .Table:
 		index := fmt.aprintf("index_%d", depth)
@@ -905,10 +893,10 @@ emit_state_checks :: proc(out: Output, type: ^Type, path: string, upper_name: st
 		fmt.sbprintf(out, "%sfor (int %s = 0; %s < %s; %s += 1) {{\n", indent, index, index, limit, index)
 		if type.kind == .Table {
 			for column in type.fields {
-				emit_state_checks(out, column.type, fmt.aprintf("%s.%s[%s]", path, column.name, index), upper_name, line, index, depth + 1)
+				emit_state_checks(out, column.type, fmt.aprintf("%s.%s[%s]", path, column.name, index), location, index, depth + 1)
 			}
 		} else {
-			emit_state_checks(out, type.element, fmt.aprintf("%s.elements[%s]", path, index), upper_name, line, row, depth + 1)
+			emit_state_checks(out, type.element, fmt.aprintf("%s.elements[%s]", path, index), location, row, depth + 1)
 		}
 		fmt.sbprintf(out, "%s}}\n", indent)
 	}

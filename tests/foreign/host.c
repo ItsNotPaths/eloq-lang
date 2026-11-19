@@ -35,6 +35,6 @@ int main(void) {
 	assert(state.crates.weight[0] == 2.0f && state.crates.weight[1] == 4.0f && state.crates.weight[2] == 6.0f);
 
 	gauge_reading = 9;
-	assert(foreign_calls(&state) == 1 && state.abends.entries[0].code == FOREIGN_CALLS_ABEND_BAD_CASE);   // a bad enum from C
+	assert(foreign_calls(&state) == 1 && state.abends.entries[0].code == ELOQ_ABEND_BAD_CASE);   // a bad enum from C
 	return 0;
 }

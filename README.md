@@ -38,8 +38,10 @@ eloqc launch_site.eloq -out:launch_site
 cc -std=c11 -O2 host.c launch_site.c -lm -o cannon
 ```
 
-`eloqc` writes `launch_site.c` and `launch_site.h`. Your `host.c` includes the header,
-calls `launch_site_init(&state)`, then `launch_site(&state)` each step.
+`eloqc` writes `launch_site.c` and `launch_site.h`, plus `eloq.h`, which every program's header
+includes. Your `host.c` includes the header, calls `launch_site_init(&state)`, then
+`launch_site(&state)` each step. With `ELOQ_STDIO` defined,
+`eloq_print_abends(&state.abends, stderr)` prints the step's codes.
 
 `eloqc --format file.eloq` tidies a file in place. `eloqc --report` prints every report
 on stdout: coercions, what each line reads and writes, and index writes whose result

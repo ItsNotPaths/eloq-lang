@@ -51,6 +51,17 @@ main :: proc() {
 	header, source := emit_program(&program, base_name(output_path))
 	write_file(strings.concatenate({output_path, ".h"}), header)
 	write_file(strings.concatenate({output_path, ".c"}), source)
+	write_runtime_header(output_path)
+}
+
+RUNTIME_HEADER :: #load("../library/eloq.h", string)
+
+// Every program's header includes eloq.h, so it goes next to the output.
+write_runtime_header :: proc(output_path: string) {
+	directory := output_path[:strings.last_index_byte(output_path, '/') + 1]
+	path := strings.concatenate({directory, "eloq.h"})
+	if !os.exists(path) do fmt.printfln("wrote %s: the header every eloq program includes", path)
+	write_file(path, RUNTIME_HEADER)
 }
 
 Location :: struct {

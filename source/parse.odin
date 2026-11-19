@@ -91,11 +91,13 @@ Part :: struct {
 	name:       string, // Procedure
 	expression: ^ast.Expr, // Data, Gate
 	parsed:     Parsed,
+	appends:    bool, // Data: a table that gets a new row
 }
 
 Line :: struct {
 	location:     Location,
 	repeat_count: int, // 0 runs once
+	row_table:    ^Type, // runs once per row of this table
 	parts:        [dynamic]Part,
 }
 

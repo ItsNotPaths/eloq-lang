@@ -21,7 +21,9 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	fmt.sbprintf(out, "typedef struct {{\n")
 	for field in program.fields do fmt.sbprintf(out, "\t%s %s;\n", c_type_name(field.type), field.name)
 	fmt.sbprintf(out, "}} %s;\n\n", state_type)
-	fmt.sbprintf(out, "typedef enum {{ %s_OK, %s_ABEND_BAD_CASE }} %s;\n\n", upper_name, upper_name, abend_type)
+	fmt.sbprintf(out, "typedef enum {{\n\t%s_OK,\n", upper_name)
+	for abend in ABENDS do fmt.sbprintf(out, "\t%s_ABEND_%s,\n", upper_name, abend)
+	fmt.sbprintf(out, "}} %s;\n\n", abend_type)
 	fmt.sbprintf(out, "void %s_init(%s *state);\n", program.state_name, state_type)
 	fmt.sbprintf(out, "%s %s(%s *state);\n\n#endif\n", abend_type, program.state_name, state_type)
 
@@ -33,12 +35,12 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	for match in program.matches {
 		if !match.has_pipes do append(&value_matches, match)
 	}
-	for definition in values do fmt.sbprintf(out, "%s;\n", value_signature(definition.name, definition.type, state_type))
-	for match in value_matches do fmt.sbprintf(out, "%s;\n", value_signature(match.name, match.type, state_type))
+	for definition in values do fmt.sbprintf(out, "%s;\n", value_signature(definition.name, definition.type, definition.row_table, state_type))
+	for match in value_matches do fmt.sbprintf(out, "%s;\n", value_signature(match.name, match.type, match.row_table, state_type))
 	for procedure in program.procedures do fmt.sbprintf(out, "%s;\n", procedure_signature(procedure, state_type))
 	for definition in values {
-		scope := Scope{parsed = &definition.parsed}
-		fmt.sbprintf(out, "\n%s {{\n\treturn ", value_signature(definition.name, definition.type, state_type))
+		scope := Scope{parsed = &definition.parsed, row_table = definition.row_table}
+		fmt.sbprintf(out, "\n%s {{\n\treturn ", value_signature(definition.name, definition.type, definition.row_table, state_type))
 		emit_expression(program, &scope, out, definition.expression, definition.type)
 		fmt.sbprintf(out, ";\n}}\n")
 	}
@@ -55,9 +57,14 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	}
 	fmt.sbprintf(out, "}}\n\n%s %s(%s *state) {{\n", abend_type, program.state_name, state_type)
 	for field in program.fields {
-		emit_case_checks(out, field.type, fmt.aprintf("state->%s", field.name), fmt.aprintf("%s_ABEND_BAD_CASE", upper_name), 1)
+		emit_state_checks(out, field.type, fmt.aprintf("state->%s", field.name), upper_name, 1)
 	}
-	for line, index in program.lines do emit_line(program, out, line, index + 1)
+	tables := state_tables(program)
+	for table in tables {
+		if table.appends do fmt.sbprintf(out, "\tint %s_added = 0;\n", table.name)
+	}
+	for line, index in program.lines do emit_line(program, out, line, index + 1, upper_name)
+	for table in tables do emit_row_changes(out, table)
 	fmt.sbprintf(out, "\treturn %s_OK;\n}}\n", upper_name)
 
 	return strings.to_string(header_builder), strings.to_string(source_builder)
@@ -92,6 +99,53 @@ emit_type :: proc(out: Output, type: ^Type, emitted: ^map[^Type]bool) {
 		fmt.sbprintf(out, "typedef struct {{\n")
 		for field in type.fields do fmt.sbprintf(out, "\t%s %s;\n", c_type_name(field.type), field.name)
 		fmt.sbprintf(out, "}} %s;\n\n", type.name)
+	case .Table:
+		emit_type(out, type.row, emitted)
+		fmt.sbprintf(out, "typedef struct {{\n")
+		for field in type.fields do fmt.sbprintf(out, "\t%s %s[%d];\n", c_type_name(field.type), field.name, type.count)
+		fmt.sbprintf(out, "\tint count;\n\tuint8_t removed[%d];\n}} %s;\n\n", type.count, c_type_name(type))
+	}
+}
+
+ABENDS :: [?]string{"BAD_CASE", "BAD_COUNT", "TABLE_FULL"}
+
+state_tables :: proc(program: ^Program) -> [dynamic]^Type {
+	tables: [dynamic]^Type
+	for field in program.fields {
+		if field.type.kind == .Table do append(&tables, field.type)
+	}
+	return tables
+}
+
+// Rows added or removed during the step land here: new rows count, then removed
+// rows are swapped out for the last row.
+emit_row_changes :: proc(out: Output, table: ^Type) {
+	if table.appends do fmt.sbprintf(out, "\tstate->%s.count += %s_added;\n", table.name, table.name)
+	if !table.removes do return
+	fmt.sbprintf(out, "\tfor (int row = 0; row < state->%s.count;) {{\n", table.name)
+	fmt.sbprintf(out, "\t\tif (!state->%s.removed[row]) {{\n\t\t\trow += 1;\n\t\t\tcontinue;\n\t\t}}\n", table.name)
+	fmt.sbprintf(out, "\t\tint last = --state->%s.count;\n", table.name)
+	for column in table.fields {
+		fmt.sbprintf(out, "\t\tstate->%s.%s[row] = state->%s.%s[last];\n", table.name, column.name, table.name, column.name)
+	}
+	fmt.sbprintf(out, "\t\tstate->%s.removed[row] = state->%s.removed[last];\n", table.name, table.name)
+	fmt.sbprintf(out, "\t\tstate->%s.removed[last] = 0;\n\t}}\n", table.name)
+}
+
+// One row read out of the columns, as a struct.
+row_literal :: proc(table: ^Type, index: string) -> string {
+	builder := strings.builder_make()
+	fmt.sbprintf(&builder, "(%s){{", table.row.name)
+	for column, position in table.fields {
+		fmt.sbprintf(&builder, "%s.%s = state->%s.%s[%s]", position == 0 ? " " : ", ", column.name, table.name, column.name, index)
+	}
+	fmt.sbprintf(&builder, " }}")
+	return strings.to_string(builder)
+}
+
+emit_row_store :: proc(out: Output, indent: string, table: ^Type, index: string, flow_variable: string) {
+	for column in table.fields {
+		fmt.sbprintf(out, "%sstate->%s.%s[%s] = %s.%s;\n", indent, table.name, column.name, index, flow_variable, column.name)
 	}
 }
 
@@ -100,6 +154,7 @@ c_type_name :: proc(type: ^Type) -> string {
 	if type.kind == .Array && strings.has_prefix(type.name, "[") {
 		return fmt.aprintf("Array_%d_%s", type.count, c_type_name(type.element))
 	}
+	if type.kind == .Table do return strings.concatenate({strings.to_ada_case(type.name), "_Table"})
 	return type.name
 }
 
@@ -115,8 +170,9 @@ on_demand_values :: proc(program: ^Program) -> [dynamic]^Definition {
 	return values
 }
 
-value_signature :: proc(name: string, type: ^Type, state_type: string) -> string {
-	return fmt.aprintf("static inline %s value_%s(const %s *state)", c_type_name(type), name, state_type)
+value_signature :: proc(name: string, type: ^Type, row_table: ^Type, state_type: string) -> string {
+	row := ", int row" if row_table != nil else ""
+	return fmt.aprintf("static inline %s value_%s(const %s *state%s)", c_type_name(type), name, state_type, row)
 }
 
 // Parameters: the read-only slot, then the written slot. Returns the written slot.
@@ -166,26 +222,36 @@ Line_Emitter :: struct {
 	indent:     string,
 	flow_count: int,
 	has_gate:   bool,
+	row_table:  ^Type,
+	upper_name: string,
 }
 
-emit_line :: proc(program: ^Program, out: Output, line: Line, number: int) {
+// A line over a table is a loop over its rows. A gate skips to the next row.
+emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string) {
 	parts := line.parts[:]
-	emitter := Line_Emitter{program = program, out = out, number = number, indent = "\t\t", flow_count = 1}
+	emitter := Line_Emitter{program = program, out = out, number = number, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name}
 
 	fmt.sbprintf(out, "\t{{ // %s:%d\n", line.location.path, line.location.line)
-	if line.repeat_count > 0 {
-		fmt.sbprintf(out, "\t\tfor (int pass = 0; pass < %d; pass += 1) {{\n", line.repeat_count)
-		emitter.indent = "\t\t\t"
+	outer_indent := emitter.indent
+	if line.row_table != nil {
+		fmt.sbprintf(out, "%sfor (int row = 0; row < state->%s.count; row += 1) {{\n", emitter.indent, line.row_table.name)
+		emitter.indent = strings.concatenate({emitter.indent, "\t"})
 	}
-	scope := Scope{parsed = &parts[0].parsed}
+	loop_indent := emitter.indent
+	if line.repeat_count > 0 {
+		fmt.sbprintf(out, "%sfor (int pass = 0; pass < %d; pass += 1) {{\n", emitter.indent, line.repeat_count)
+		emitter.indent = strings.concatenate({emitter.indent, "\t"})
+	}
+	scope := Scope{parsed = &parts[0].parsed, row_table = line.row_table}
 	flow := default_type(type_of(program, &scope, parts[0].expression))
 	fmt.sbprintf(out, "%s%s flow_1 = ", emitter.indent, c_type_name(flow))
 	emit_expression(program, &scope, out, parts[0].expression, flow)
 	fmt.sbprintf(out, ";\n")
 	emit_parts(&emitter, parts[1:], flow, "flow_1", nil)
 
-	if line.repeat_count > 0 do fmt.sbprintf(out, "\t\t}}\n")
-	if emitter.has_gate do fmt.sbprintf(out, "\tline_%d_end:;\n", number)
+	if line.repeat_count > 0 do fmt.sbprintf(out, "%s}}\n", loop_indent)
+	if emitter.has_gate do fmt.sbprintf(out, "%sline_%d_end:;\n", loop_indent, number)
+	if line.row_table != nil do fmt.sbprintf(out, "%s}}\n", outer_indent)
 	fmt.sbprintf(out, "\t}}\n")
 }
 
@@ -194,7 +260,7 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 	program, out, indent := emitter.program, emitter.out, emitter.indent
 	flow, flow_variable := flow, flow_variable
 	for &part, index in parts {
-		scope := Scope{parsed = &part.parsed, flow_type = flow, flow_variable = flow_variable}
+		scope := Scope{parsed = &part.parsed, flow_type = flow, flow_variable = flow_variable, row_table = emitter.row_table}
 		switch part.kind {
 		case .Gate:
 			fmt.sbprintf(out, "%sif (!(", indent)
@@ -202,14 +268,28 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 			fmt.sbprintf(out, ")) goto line_%d_end;\n", emitter.number)
 			emitter.has_gate = true
 		case .Data:
-			fmt.sbprintf(out, "%s", indent)
-			emit_expression(program, &scope, out, part.expression, nil)
-			fmt.sbprintf(out, " = %s;\n", flow_variable)
+			table := table_named(program, part.expression)
+			switch {
+			case part.appends:
+				fmt.sbprintf(out, "%sif (state->%s.count + %s_added >= %d) return %s_ABEND_TABLE_FULL;\n", indent, table.name, table.name, table.count, emitter.upper_name)
+				emit_row_store(out, indent, table, fmt.aprintf("state->%s.count + %s_added", table.name, table.name), flow_variable)
+				fmt.sbprintf(out, "%s%s_added += 1;\n", indent, table.name)
+			case table != nil:
+				emit_row_store(out, indent, table, "row", flow_variable)
+			case:
+				fmt.sbprintf(out, "%s", indent)
+				emit_expression(program, &scope, out, part.expression, nil)
+				fmt.sbprintf(out, " = %s;\n", flow_variable)
+			}
 		case .Procedure:
 			destination := destination_of(parts[index + 1:], outer)
+			if part.name == "remove" {
+				fmt.sbprintf(out, "%sstate->%s.removed[row] = 1;\n", indent, emitter.row_table.name)
+				continue
+			}
 			#partial switch found in program.names[part.name] {
 			case ^Procedure:
-				call := procedure_call(program, found, flow_variable, destination)
+				call := procedure_call(program, found, flow_variable, destination, emitter.row_table)
 				if found.output == nil {
 					fmt.sbprintf(out, "%s%s;\n", indent, call)
 					continue
@@ -218,7 +298,7 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 				flow_variable = next_flow(emitter)
 				fmt.sbprintf(out, "%s%s %s = %s;\n", indent, c_type_name(flow), flow_variable, call)
 			case ^Match:
-				output := check_parts(program, found.arms[0].parts[:], flow, destination, found.location)
+				output := check_parts(program, found.arms[0].parts[:], flow, destination, emitter.row_table, found.location)
 				result := next_flow(emitter)
 				fmt.sbprintf(out, "%s%s %s;\n", indent, c_type_name(output), result)
 				emit_switch_open(emitter.program, out, found, indent)
@@ -242,13 +322,13 @@ next_flow :: proc(emitter: ^Line_Emitter) -> string {
 	return fmt.aprintf("flow_%d", emitter.flow_count)
 }
 
-procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: string, destination: ^Part) -> string {
+procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: string, destination: ^Part, row_table: ^Type) -> string {
 	arguments := strings.builder_make()
 	fmt.sbprintf(&arguments, "state, %s", flow_variable)
 	if procedure.input != nil && procedure.output != nil {
 		fmt.sbprintf(&arguments, ", ")
-		if destination != nil {
-			scope := Scope{parsed = &destination.parsed}
+		if destination != nil && !destination.appends {
+			scope := Scope{parsed = &destination.parsed, row_table = row_table}
 			emit_expression(program, &scope, &arguments, destination.expression, nil)
 		} else {
 			fmt.sbprintf(&arguments, "(%s){{0}}", c_type_name(procedure.output.type))
@@ -258,7 +338,7 @@ procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: 
 }
 
 emit_switch_open :: proc(program: ^Program, out: Output, match: ^Match, indent: string) {
-	scope := Scope{parsed = &match.parsed}
+	scope := Scope{parsed = &match.parsed, row_table = match.row_table}
 	fmt.sbprintf(out, "%sswitch ((int)(", indent)
 	emit_expression(program, &scope, out, match.subject, nil)
 	fmt.sbprintf(out, ")) {{\n")
@@ -282,11 +362,11 @@ case_labels :: proc(match: ^Match, arm_index: int) -> string {
 }
 
 emit_value_match :: proc(program: ^Program, out: Output, match: ^Match, state_type: string) {
-	fmt.sbprintf(out, "\n%s {{\n", value_signature(match.name, match.type, state_type))
+	fmt.sbprintf(out, "\n%s {{\n", value_signature(match.name, match.type, match.row_table, state_type))
 	if !match.touches_state do fmt.sbprintf(out, "\t(void)state;\n")
 	emit_switch_open(program, out, match, "\t")
 	for &arm, index in match.arms {
-		scope := Scope{parsed = &arm.parsed}
+		scope := Scope{parsed = &arm.parsed, row_table = match.row_table}
 		fmt.sbprintf(out, "\t%s return ", case_labels(match, index))
 		emit_expression(program, &scope, out, arm.value, match.type)
 		fmt.sbprintf(out, ";\n")
@@ -294,21 +374,31 @@ emit_value_match :: proc(program: ^Program, out: Output, match: ^Match, state_ty
 	fmt.sbprintf(out, "\t}}\n}}\n")
 }
 
-// A host can write any number into an enum field. Catch it before anything reads it.
-emit_case_checks :: proc(out: Output, type: ^Type, path: string, abend: string, depth: int) {
-	if !holds_enum(type) do return
+// A host can write any number into an enum or a table count. Catch it before anything reads it.
+emit_state_checks :: proc(out: Output, type: ^Type, path: string, upper_name: string, depth: int) {
 	indent := strings.repeat("\t", depth)
+	if type.kind == .Table {
+		fmt.sbprintf(out, "%sif ((unsigned)%s.count > %d) return %s_ABEND_BAD_COUNT;\n", indent, path, type.count, upper_name)
+	}
+	if !holds_enum(type) do return
 	#partial switch type.kind {
 	case .Enum:
-		fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s;\n", indent, path, len(type.cases), abend)
+		fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s_ABEND_BAD_CASE;\n", indent, path, len(type.cases), upper_name)
 	case .Struct:
 		for field in type.fields {
-			emit_case_checks(out, field.type, fmt.aprintf("%s.%s", path, field.name), abend, depth)
+			emit_state_checks(out, field.type, fmt.aprintf("%s.%s", path, field.name), upper_name, depth)
 		}
-	case .Array:
+	case .Array, .Table:
 		index := fmt.aprintf("index_%d", depth)
-		fmt.sbprintf(out, "%sfor (int %s = 0; %s < %d; %s += 1) {{\n", indent, index, index, type.count, index)
-		emit_case_checks(out, type.element, fmt.aprintf("%s.elements[%s]", path, index), abend, depth + 1)
+		limit := fmt.aprintf("%s.count", path) if type.kind == .Table else fmt.aprintf("%d", type.count)
+		fmt.sbprintf(out, "%sfor (int %s = 0; %s < %s; %s += 1) {{\n", indent, index, index, limit, index)
+		if type.kind == .Table {
+			for column in type.fields {
+				emit_state_checks(out, column.type, fmt.aprintf("%s.%s[%s]", path, column.name, index), upper_name, depth + 1)
+			}
+		} else {
+			emit_state_checks(out, type.element, fmt.aprintf("%s.elements[%s]", path, index), upper_name, depth + 1)
+		}
 		fmt.sbprintf(out, "%s}}\n", indent)
 	}
 }
@@ -323,6 +413,8 @@ holds_enum :: proc(type: ^Type) -> bool {
 		}
 	case .Array:
 		return holds_enum(type.element)
+	case .Table:
+		return holds_enum(type.row)
 	}
 	return false
 }
@@ -367,6 +459,11 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 			fmt.sbprintf(out, "%s", enum_constant(enum_type, node.field.name))
 			return
 		}
+		if table := table_named(program, node.expr); table != nil && find_slot(scope.procedure, table.name) == nil {
+			fmt.sbprintf(out, "state->%s.%s[row]", table.name, node.field.name)
+			emit_element(out, type, element)
+			return
+		}
 		emit_expression(program, scope, out, node.expr, nil)
 		base := type_of(program, scope, node.expr)
 		if base.kind == .Array {
@@ -407,6 +504,13 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 			emit_expression(program, scope, out, field_value.value, field.type)
 		}
 		fmt.sbprintf(out, " }}")
+	case ^ast.Call_Expr:
+		table := table_named(program, node.args[0])
+		if node.expr.derived.(^ast.Ident).name == "count" {
+			fmt.sbprintf(out, "state->%s.count", table.name)
+		} else {
+			fmt.sbprintf(out, "%d", table.count)
+		}
 	}
 }
 
@@ -452,9 +556,13 @@ c_name :: proc(program: ^Program, scope: ^Scope, name: string) -> string {
 	case find_slot(scope.procedure, name) != nil:
 		return strings.concatenate({"slot_", name})
 	}
-	#partial switch _ in program.names[name] {
-	case ^Definition, ^Match:
-		return fmt.aprintf("value_%s(state)", name)
+	#partial switch found in program.names[name] {
+	case ^Definition:
+		return fmt.aprintf("value_%s(state%s)", name, ", row" if found.row_table != nil else "")
+	case ^Match:
+		return fmt.aprintf("value_%s(state%s)", name, ", row" if found.row_table != nil else "")
+	case ^Field:
+		if found.type.kind == .Table do return row_literal(found.type, "row")
 	}
 	return strings.concatenate({"state->", name})
 }

@@ -14,6 +14,27 @@ Scope :: struct {
 	flow_type:     ^Type,
 	flow_variable: string,
 	touches_state: bool,
+	row_table:     ^Type, // the table whose current row columns read from
+	row_open:      bool, // the first column read picks row_table (on-demand values)
+}
+
+// A column or a per-row value needs a row of its table.
+use_row :: proc(scope: ^Scope, table: ^Type, location: Location) {
+	switch {
+	case scope.row_table == table:
+	case scope.row_table == nil && scope.row_open:
+		scope.row_table = table
+	case:
+		fail(location, "%s is per row, use it in a line over %s", table.name, table.name)
+	}
+}
+
+table_named :: proc(program: ^Program, expression: ^ast.Expr) -> ^Type {
+	if expression == nil do return nil
+	name, is_name := expression.derived.(^ast.Ident)
+	if !is_name do return nil
+	field, is_field := program.names[name.name].(^Field)
+	return field.type if is_field && field.type.kind == .Table else nil
 }
 
 node_location :: proc(scope: ^Scope, node: ^ast.Node) -> Location {
@@ -101,8 +122,9 @@ check_definition :: proc(program: ^Program, definition: ^Definition) {
 	case .Unchecked:
 	}
 	definition.status = .Checking
-	scope := Scope{parsed = &definition.parsed}
+	scope := Scope{parsed = &definition.parsed, row_open = true}
 	type := type_of(program, &scope, definition.expression)
+	definition.row_table = scope.row_table
 	definition.constant = !scope.touches_state
 	definition.type = definition.constant ? type : default_type(type)
 	definition.status = .Checked
@@ -130,9 +152,11 @@ check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 			complete_type(program, found)
 			slot.type = found
 		case ^Field:
-			slot.type = found.type
-		case ^Definition, ^Procedure, ^Match, nil:
-			fail(location, "slot %s must be labeled with a type or a state name", slot.name)
+			slot.type = found.type.row if found.type.kind == .Table else found.type
+		case nil:
+			slot.type = column_type(program, slot.name, location)
+		case ^Definition, ^Procedure, ^Match:
+			fail(location, "slot %s must be labeled with a type, a state name or a column", slot.name)
 		}
 		switch {
 		case slot.written:
@@ -149,6 +173,21 @@ check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 		check_assignment(program, &scope, statement.derived.(^ast.Assign_Stmt))
 	}
 	procedure.touches_state = scope.touches_state
+}
+
+// A column name as a slot label, when every table agrees on its type.
+column_type :: proc(program: ^Program, name: string, location: Location) -> ^Type {
+	type: ^Type
+	for field in program.fields {
+		if field.type.kind != .Table do continue
+		for column in field.type.fields {
+			if column.name != name do continue
+			if type != nil && type != column.type do fail(location, "slot %s: columns named %s differ in type, label it with a type", name, name)
+			type = column.type
+		}
+	}
+	if type == nil do fail(location, "slot %s must be labeled with a type, a state name or a column", name)
+	return type
 }
 
 // Adds a slot for a `$` name, and records how slot names are used.
@@ -235,38 +274,94 @@ check_line :: proc(program: ^Program, line: ^Line) {
 	if len(parts) < 2 || parts[0].kind != .Data || parts[len(parts) - 1].kind != .Data {
 		fail(line.location, "a line needs data on both ends")
 	}
-	scope := Scope{parsed = &parts[0].parsed}
+	line.row_table = line_row_table(program, line)
+	last := &parts[len(parts) - 1]
+	if table := table_named(program, last.expression); table != nil && table != line.row_table {
+		last.appends = true
+		table.appends = true
+	}
+	scope := Scope{parsed = &parts[0].parsed, row_table = line.row_table}
 	flow := default_type(type_of(program, &scope, parts[0].expression))
-	check_parts(program, parts[1:], flow, nil, line.location)
+	check_parts(program, parts[1:], flow, nil, line.row_table, line.location)
+}
+
+// The table a line runs over, once per row: the one its columns or per-row values
+// name. A table at the end of the line is a target, not a reason to loop.
+line_row_table :: proc(program: ^Program, line: ^Line) -> ^Type {
+	table: ^Type
+	last := len(line.parts) - 1
+	for &part, index in line.parts {
+		if index == last && table_named(program, part.expression) != nil do continue
+		note_row_tables(program, &part, &table, line.location)
+	}
+	return table
+}
+
+note_row_tables :: proc(program: ^Program, part: ^Part, table: ^^Type, location: Location) {
+	note :: proc(table: ^^Type, found: ^Type, location: Location) {
+		if found == nil do return
+		if table^ != nil && table^ != found do fail(location, "a line runs over one table, this one names %s and %s", table^.name, found.name)
+		table^ = found
+	}
+	switch part.kind {
+	case .Data, .Gate:
+		for name in gather_names(part.expression) {
+			#partial switch found in program.names[name.name] {
+			case ^Field:
+				if found.type.kind == .Table do note(table, found.type, location)
+			case ^Definition:
+				note(table, found.row_table, location)
+			case ^Match:
+				note(table, found.row_table, location)
+			}
+		}
+	case .Procedure:
+		match, is_match := program.names[part.name].(^Match)
+		if !is_match do return
+		note(table, match.row_table, location)
+		for &arm in match.arms {
+			for &arm_part in arm.parts do note_row_tables(program, &arm_part, table, location)
+		}
+	}
 }
 
 // Checks parts fed with `flow` and returns what flows out. `outer` is where output
 // lands when the parts run out, for match arms.
-check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part, location: Location) -> ^Type {
+check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part, row_table: ^Type, location: Location) -> ^Type {
 	flow := flow
 	for &part, index in parts {
-		scope := Scope{parsed = &part.parsed, flow_type = flow}
+		scope := Scope{parsed = &part.parsed, flow_type = flow, row_table = row_table}
 		switch part.kind {
 		case .Gate:
 			if gate_type := type_of(program, &scope, part.expression); gate_type.kind != .Boolean {
 				fail(location, "a gate needs a bool, got %s", gate_type.name)
 			}
 		case .Data:
+			if part.appends {
+				table := table_named(program, part.expression)
+				if flow != table.row do fail(location, "a row of %s is %s, got %s", table.name, table.row.name, flow.name)
+				continue
+			}
 			check_target(program, &scope, part.expression, location)
 			if target_type := type_of(program, &scope, part.expression); target_type != flow {
 				fail(location, "cannot write %s to %s", flow.name, target_type.name)
 			}
 		case .Procedure:
 			destination := destination_of(parts[index + 1:], outer)
+			if part.name == "remove" {
+				if row_table == nil || flow != row_table.row do fail(location, "remove takes a row of the table the line runs over")
+				row_table.removes = true
+				continue
+			}
 			switch found in program.names[part.name] {
 			case ^Procedure:
-				flow = check_call(program, found, flow, destination, location)
+				flow = check_call(program, found, flow, destination, row_table, location)
 			case ^Match:
 				if !found.has_pipes do fail(location, "%s is a value, not a proc", part.name)
 				check_match(program, found)
 				output: ^Type
 				for &arm in found.arms {
-					arm_output := check_parts(program, arm.parts[:], flow, destination, arm.location)
+					arm_output := check_parts(program, arm.parts[:], flow, destination, row_table, arm.location)
 					if output != nil && arm_output != output {
 						fail(arm.location, "arms of %s give %s and %s", part.name, output.name, arm_output.name)
 					}
@@ -281,17 +376,22 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 	return flow
 }
 
-check_call :: proc(program: ^Program, procedure: ^Procedure, flow: ^Type, destination: ^Part, location: Location) -> ^Type {
+check_call :: proc(program: ^Program, procedure: ^Procedure, flow: ^Type, destination: ^Part, row_table: ^Type, location: Location) -> ^Type {
 	fed := procedure.input if procedure.input != nil else procedure.output
 	if fed.type != flow do fail(location, "%s takes %s, got %s", procedure.name, fed.type.name, flow.name)
 	if procedure.output == nil do return flow
 	if destination != nil {
-		scope := Scope{parsed = &destination.parsed}
-		if type_of(program, &scope, destination.expression) != procedure.output.type {
+		if destination_type(program, destination, row_table) != procedure.output.type {
 			fail(location, "%s gives %s, which does not fit its destination", procedure.name, procedure.output.type.name)
 		}
 	}
 	return procedure.output.type
+}
+
+destination_type :: proc(program: ^Program, destination: ^Part, row_table: ^Type) -> ^Type {
+	if destination.appends do return table_named(program, destination.expression).row
+	scope := Scope{parsed = &destination.parsed, row_table = row_table}
+	return type_of(program, &scope, destination.expression)
 }
 
 // The data a proc's output lands in: the next data part, past any gates.
@@ -318,7 +418,7 @@ check_match :: proc(program: ^Program, match: ^Match) {
 	case .Unchecked:
 	}
 	match.status = .Checking
-	scope := Scope{parsed = &match.parsed}
+	scope := Scope{parsed = &match.parsed, row_open = true}
 	subject := default_type(type_of(program, &scope, match.subject))
 	match.subject_type = subject
 	cases: []string
@@ -348,14 +448,16 @@ check_match :: proc(program: ^Program, match: ^Match) {
 
 	if !match.has_pipes {
 		for &arm in match.arms {
-			arm_scope := Scope{parsed = &arm.parsed}
+			arm_scope := Scope{parsed = &arm.parsed, row_table = scope.row_table, row_open = true}
 			arm_type := type_of(program, &arm_scope, arm.value)
 			match.type = arm_type if match.type == nil else unify(match.type, arm_type, arm.location)
 			scope.touches_state ||= arm_scope.touches_state
+			if arm_scope.row_table != nil do use_row(&scope, arm_scope.row_table, arm.location)
 		}
 		match.type = default_type(match.type)
 	}
 	match.touches_state = scope.touches_state
+	match.row_table = scope.row_table
 	match.status = .Checked
 }
 
@@ -510,6 +612,12 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 			if unified := unify(left, right, location); unified.kind == .Integer do return unified
 			fail(location, "%s needs integers", node.op.text)
 		}
+	case ^ast.Call_Expr:
+		name, is_name := node.expr.derived.(^ast.Ident)
+		if !is_name || (name.name != "count" && name.name != "capacity") do fail(location, "calls are count(table) and capacity(table)")
+		if len(node.args) != 1 || table_named(program, node.args[0]) == nil do fail(location, "%s takes a table", name.name)
+		if name.name == "count" do scope.touches_state = true
+		return builtin_type("int")
 	case ^ast.Comp_Lit:
 		if node.type == nil do fail(location, "name the type: Vector{1, 2, 3}")
 		type := resolve_type(program, scope, node.type)
@@ -548,15 +656,19 @@ type_of_name :: proc(program: ^Program, scope: ^Scope, name: string, location: L
 	switch found in program.names[name] {
 	case ^Field:
 		scope.touches_state = true
-		return found.type
+		if found.type.kind != .Table do return found.type
+		use_row(scope, found.type, location)
+		return found.type.row
 	case ^Definition:
 		check_definition(program, found)
 		if !found.constant do scope.touches_state = true
+		if found.row_table != nil do use_row(scope, found.row_table, location)
 		return found.type
 	case ^Match:
 		if found.has_pipes do fail(location, "%s is a proc, not a value", name)
 		check_match(program, found)
 		scope.touches_state = true
+		if found.row_table != nil do use_row(scope, found.row_table, location)
 		return found.type
 	case ^Type, ^Procedure:
 		fail(location, "%s is not a value", name)

@@ -1,0 +1,29 @@
+Vector :: [3]float
+
+shells :: table 4
+	position : Vector
+	velocity : Vector
+	lifetime : float
+
+state launch_site
+	cannon_ready := true
+	cannon_aim   := Vector{0, 1, 0}
+	tick_length  :: 1.0
+
+expired :: shells.lifetime <= 0
+room    :: count(shells) < capacity(shells)
+
+age ::
+	$float = float - 1
+
+move ::
+	$position = position + $velocity * tick_length
+
+fire ::
+	$shells.velocity = $Vector * 2
+	shells.lifetime = 3
+
+shells.lifetime |age| shells.lifetime
+shells.velocity |move| shells.position
+shells          ?expired? |remove| shells
+cannon_aim      ?cannon_ready? ?room? |fire| shells

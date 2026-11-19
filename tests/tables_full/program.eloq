@@ -1,0 +1,11 @@
+sparks :: table 1
+	heat : float
+
+state forge
+	heat_source := 1.0
+
+make_spark ::
+	$sparks.heat = $float
+
+heat_source |make_spark| sparks
+heat_source |make_spark| sparks

@@ -1,6 +1,7 @@
 package eloqc
 
 import "core:odin/ast"
+import "core:strconv"
 import "core:strings"
 
 Type_Kind :: enum {
@@ -10,6 +11,7 @@ Type_Kind :: enum {
 	Struct,
 	Enum,
 	Array,
+	Table, // fields are the columns, count the capacity
 }
 
 Type :: struct {
@@ -24,6 +26,9 @@ Type :: struct {
 	count:           int, // Array
 	alias:           ^ast.Expr, // named Array, until resolved
 	alias_parsed:    Parsed,
+	row:             ^Type, // Table: one row as a struct
+	appends:         bool, // Table: some line adds rows
+	removes:         bool, // Table: some line removes rows
 }
 
 Field :: struct {
@@ -48,6 +53,7 @@ Definition :: struct {
 	parsed:     Parsed,
 	type:       ^Type,
 	constant:   bool,
+	row_table:  ^Type, // set when it reads columns: one value per row
 	status:     Check_Status,
 }
 
@@ -79,6 +85,7 @@ Match :: struct {
 	subject_type:  ^Type,
 	type:          ^Type, // value matches
 	touches_state: bool,
+	row_table:     ^Type,
 	status:        Check_Status,
 }
 
@@ -170,6 +177,7 @@ build_program :: proc(items: []Item) -> Program {
 }
 
 add_name :: proc(program: ^Program, name: string, value: Name, location: Location) {
+	if name == "remove" || name == "count" || name == "capacity" do fail(location, "%s is built in", name)
 	if name in program.names do fail(location, "%s is already defined", name)
 	program.names[name] = value
 }
@@ -186,24 +194,48 @@ add_definition :: proc(program: ^Program, item: Item) {
 		add_name(program, name, procedure, location)
 		append(&program.procedures, procedure)
 	case rest == "struct":
-		type := new_clone(Type{name = name, kind = .Struct, location = location})
-		for entry in body_entries(item) {
-			field_name, _, type_text := strings.partition(entry.text, ":")
-			type_expression, parsed := parse_expression(strings.trim_space(type_text), entry)
-			append(&type.fields, new_clone(Field{name = strings.trim_space(field_name), location = entry, type_expression = type_expression, parsed = parsed}))
-		}
-		add_type(program, type)
+		add_type(program, new_clone(Type{name = name, kind = .Struct, location = location, fields = parse_fields(item)}))
 	case rest == "enum":
 		type := new_clone(Type{name = name, kind = .Enum, location = location})
 		for entry in body_entries(item) do append(&type.cases, entry.text)
 		add_type(program, type)
 	case strings.has_prefix(rest, "?"), strings.has_prefix(rest, GATE_OPENER):
 		add_match(program, name, rest, item)
-	case strings.has_prefix(rest, "table"), strings.has_prefix(rest, "foreign"):
+	case strings.has_prefix(rest, "table "):
+		add_table(program, name, rest, item)
+	case strings.has_prefix(rest, "foreign"):
 		fail(location, "%s: not built yet", rest)
 	case:
 		add_declaration(program, item.header.text, location)
 	}
+}
+
+parse_fields :: proc(item: Item) -> [dynamic]^Field {
+	fields: [dynamic]^Field
+	for entry in body_entries(item) {
+		field_name, _, type_text := strings.partition(entry.text, ":")
+		type_expression, parsed := parse_expression(strings.trim_space(type_text), entry)
+		append(&fields, new_clone(Field{name = strings.trim_space(field_name), location = entry, type_expression = type_expression, parsed = parsed}))
+	}
+	return fields
+}
+
+// A table is stored data. Its type is not a name; its row type is.
+add_table :: proc(program: ^Program, name: string, header: string, item: Item) {
+	location := item.header.location
+	capacity, ok := strconv.parse_int(strings.trim_space(header[len("table "):]), 10)
+	if !ok || capacity < 1 do fail(location, "a table needs a positive capacity: %s :: table 512", name)
+	columns := parse_fields(item)
+	for column in columns {
+		if column.name == "count" || column.name == "removed" do fail(column.location, "%s is kept for the table itself", column.name)
+	}
+	row := new_clone(Type{name = strings.concatenate({strings.to_ada_case(name), "_Row"}), kind = .Struct, location = location, fields = columns})
+	add_type(program, row)
+	table := new_clone(Type{name = name, kind = .Table, location = location, fields = columns, count = capacity, row = row})
+	append(&program.types, table)
+	field := new_clone(Field{name = name, location = location, type = table})
+	add_name(program, name, field, location)
+	append(&program.fields, field)
 }
 
 add_match :: proc(program: ^Program, name: string, header: string, item: Item) {

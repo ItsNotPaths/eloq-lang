@@ -1,4 +1,4 @@
-insert math
+include math
 
 enemies :: table 4
 	position : Vector3

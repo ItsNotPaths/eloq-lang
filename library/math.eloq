@@ -1,4 +1,4 @@
-// Built into eloqc. `insert math` uses it when no local math.eloq exists.
+// Built into eloqc. `include math` uses it when no local math.eloq exists.
 Vector2 :: [2]float
 Vector3 :: [3]float
 Vector4 :: [4]float

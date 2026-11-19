@@ -18,20 +18,20 @@ Item :: struct {
 
 read_source :: proc(path: string) -> [dynamic]Source_Line {
 	lines: [dynamic]Source_Line
-	inserted: map[string]bool
+	included: map[string]bool
 	directory := path[:strings.last_index_byte(path, '/') + 1]
 	for line in file_lines(path) {
-		target, is_insert := insert_target(line.text)
-		if !is_insert {
+		target, is_include := include_target(line.text)
+		if !is_include {
 			append(&lines, line)
 			continue
 		}
-		for inserted_path in insert_paths(strings.concatenate({directory, target}), target, line) {
-			if inserted[inserted_path] do continue
-			inserted[inserted_path] = true
-			for inserted_line in file_lines(inserted_path) {
-				if _, nested := insert_target(inserted_line.text); !nested {
-					append(&lines, inserted_line)
+		for included_path in include_paths(strings.concatenate({directory, target}), target, line) {
+			if included[included_path] do continue
+			included[included_path] = true
+			for included_line in file_lines(included_path) {
+				if _, nested := include_target(included_line.text); !nested {
+					append(&lines, included_line)
 				}
 			}
 		}
@@ -58,12 +58,12 @@ file_lines :: proc(path: string) -> [dynamic]Source_Line {
 	return lines
 }
 
-insert_target :: proc(text: string) -> (target: string, is_insert: bool) {
-	if !strings.has_prefix(text, "insert ") do return
-	return strings.trim_space(strip_comment(text[len("insert "):])), true
+include_target :: proc(text: string) -> (target: string, is_include: bool) {
+	if !strings.has_prefix(text, "include ") do return
+	return strings.trim_space(strip_comment(text[len("include "):])), true
 }
 
-// Files built into the compiler, inserted when no local file has the name.
+// Files built into the compiler, included when no local file has the name.
 BAKED_FILES := [?]struct {
 	name: string,
 	text: string,
@@ -79,15 +79,15 @@ baked_text :: proc(name: string) -> (text: string, found: bool) {
 	return "", false
 }
 
-// A folder inserts every eloq file in it.
-insert_paths :: proc(path: string, target: string, line: Source_Line) -> []string {
+// A folder includes every eloq file in it.
+include_paths :: proc(path: string, target: string, line: Source_Line) -> []string {
 	if !os.is_directory(path) {
 		if os.exists(path) do return slice.clone([]string{path})
 		if _, found := baked_text(target); found do return slice.clone([]string{strings.concatenate({BAKED_DIRECTORY, target})})
-		fail(line, "insert: %s not found", path)
+		fail(line, "include: %s not found", path)
 	}
 	entries, error := os.read_directory_by_path(path, -1, context.allocator)
-	if error != nil do fail(line, "insert: cannot read %s", path)
+	if error != nil do fail(line, "include: cannot read %s", path)
 	paths: [dynamic]string
 	for entry in entries {
 		if strings.has_suffix(entry.name, ".eloq") || strings.has_suffix(entry.name, ".¿") {

@@ -1,4 +1,4 @@
-insert math
+include math
 
 Direction :: struct
 	y : float

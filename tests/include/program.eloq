@@ -1,0 +1,9 @@
+include shared.eloq
+include shared.eloq
+include parts
+
+state included
+	value := 1.0
+
+value |twice| value
+value |triple| value

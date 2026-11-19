@@ -86,6 +86,8 @@ Procedure :: struct {
 	output: ^Slot, // the written slot
 	access: Access,
 	status: Check_Status,
+	next_overload: ^Procedure, // the next proc of the same name
+	overloaded:    bool,
 }
 
 // `name :: ?subject?` with one arm per case. Value arms make an on-demand value,
@@ -210,9 +212,22 @@ add_value_pipe :: proc(program: ^Program, name: string, text: string, location: 
 
 add_name :: proc(program: ^Program, name: string, value: Name, location: Location) {
 	if name == "remove" || name == "abends" do fail(location, "%s is built in", name)
-	// (hole proc-overloading :tags types) one proc per name; procs should share a name when input slot types differ.
+	if procedure, is_procedure := value.(^Procedure); is_procedure {
+		if first, is_first := program.names[name].(^Procedure); is_first {
+			add_overload(first, procedure)
+			return
+		}
+	}
 	if name in program.names do fail(location, "%s is already defined", name)
 	program.names[name] = value
+}
+
+// Procs share a name when their input slot types differ; the flow picks one.
+add_overload :: proc(first, procedure: ^Procedure) {
+	last := first
+	for last.next_overload != nil do last = last.next_overload
+	last.next_overload = procedure
+	for overload := first; overload != nil; overload = overload.next_overload do overload.overloaded = true
 }
 
 add_definition :: proc(program: ^Program, item: Item) {

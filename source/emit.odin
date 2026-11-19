@@ -222,14 +222,15 @@ emit_value_pipe :: proc(program: ^Program, scope: ^Scope, out: Output, definitio
 	flow_variable := "flow_1"
 	no_cache: map[string]bool
 	for part, index in definition.pipe {
-		procedure := program.names[part.name].(^Procedure)
+		procedure := resolve_procedure(program, program.names[part.name].(^Procedure), flow, definition.parsed.location)
 		call := procedure_call(program, procedure, flow_variable, nil, definition.row_table, &no_cache)
 		if procedure.output == nil {
 			fmt.sbprintf(out, "\t%s;\n", call)
 			continue
 		}
 		flow_variable = fmt.aprintf("flow_%d", index + 2)
-		fmt.sbprintf(out, "\t%s %s = %s;\n", c_type_name(procedure.output.type), flow_variable, call)
+		flow = procedure.output.type
+		fmt.sbprintf(out, "\t%s %s = %s;\n", c_type_name(flow), flow_variable, call)
 	}
 	fmt.sbprintf(out, "\treturn %s;\n}}\n", flow_variable)
 }
@@ -304,7 +305,9 @@ part_calls_index :: proc(program: ^Program, part: ^Part) -> bool {
 	if part.kind == .Procedure {
 		#partial switch found in program.names[part.name] {
 		case ^Procedure:
-			return found.access.indexes
+			for overload := found; overload != nil; overload = overload.next_overload {
+				if overload.access.indexes do return true
+			}
 		case ^Match:
 			if reads_index_value(program, found.subject) do return true
 			for &arm in found.arms {
@@ -342,6 +345,11 @@ index_text :: proc(program: ^Program, scope: ^Scope, index: ^ast.Expr) -> string
 }
 
 // A struct or array input is spread into one argument per field.
+procedure_c_name :: proc(procedure: ^Procedure) -> string {
+	if !procedure.overloaded do return strings.concatenate({"proc_", procedure.name})
+	return fmt.aprintf("proc_%s_%s", procedure.name, c_type_name(fed_slot(procedure).type))
+}
+
 foreign_signature :: proc(procedure: ^Procedure) -> string {
 	parameters: [dynamic]string
 	for argument in foreign_arguments(procedure.input.type, "") do append(&parameters, c_type_name(argument.type))
@@ -373,7 +381,7 @@ foreign_arguments :: proc(type: ^Type, path: string) -> [dynamic]Foreign_Argumen
 procedure_signature :: proc(program: ^Program, procedure: ^Procedure, state_type: string) -> string {
 	builder := strings.builder_make()
 	return_type := procedure.output != nil ? c_type_name(procedure.output.type) : "void"
-	fmt.sbprintf(&builder, "static inline %s proc_%s(%s *state", return_type, procedure.name, state_type)
+	fmt.sbprintf(&builder, "static inline %s %s(%s *state", return_type, procedure_c_name(procedure), state_type)
 	for slot in ([]^Slot{procedure.input, procedure.output}) {
 		if slot != nil do fmt.sbprintf(&builder, ", %s slot_%s", c_type_name(slot.type), slot.name)
 	}
@@ -578,15 +586,16 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 			}
 			#partial switch found in program.names[part.name] {
 			case ^Procedure:
-				call := procedure_call(program, found, flow_variable, destination, emitter.row_table, emitter.cached)
-				if found.output == nil {
+				procedure := resolve_procedure(program, found, flow, {line = emitter.source_line})
+				call := procedure_call(program, procedure, flow_variable, destination, emitter.row_table, emitter.cached)
+				if procedure.output == nil {
 					fmt.sbprintf(out, "%s%s;\n", indent, call)
 					continue
 				}
-				flow = found.output.type
+				flow = procedure.output.type
 				flow_variable = next_flow(emitter)
 				fmt.sbprintf(out, "%s%s %s = %s;\n", indent, c_type_name(flow), flow_variable, call)
-				if found.foreign_name != "" && flow.kind == .Enum {
+				if procedure.foreign_name != "" && flow.kind == .Enum {
 					call := abend_call("abend_step", emitter.upper_name, "ABEND_BAD_CASE", emitter.source_line, emitter_row(emitter), fmt.aprintf("(int)%s", flow_variable))
 					fmt.sbprintf(out, "%sif ((uint32_t)%s >= %d) return %s;\n", indent, flow_variable, len(flow.cases), call)
 				}
@@ -667,7 +676,7 @@ procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: 
 		if line_cached[name] do fmt.sbprintf(&arguments, ", cached_%s", name)
 		else do fmt.sbprintf(&arguments, ", value_%s(state)", name)
 	}
-	return fmt.aprintf("proc_%s(%s)", procedure.name, strings.to_string(arguments))
+	return fmt.aprintf("%s(%s)", procedure_c_name(procedure), strings.to_string(arguments))
 }
 
 emit_switch_open :: proc(program: ^Program, out: Output, match: ^Match, indent: string, cached: ^map[string]bool = nil) {

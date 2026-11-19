@@ -96,6 +96,9 @@ check_program :: proc(program: ^Program) {
 	for field in program.fields do check_field(program, field)
 	for definition in program.definitions do check_definition(program, definition)
 	for procedure in program.procedures do check_procedure(program, procedure)
+	for _, name in program.names {
+		if first, ok := name.(^Procedure); ok do check_overloads(first)
+	}
 	for match in program.matches do check_match(program, match)
 	for &line in program.lines do check_line(program, &line)
 }
@@ -206,8 +209,9 @@ check_value_pipe :: proc(program: ^Program, definition: ^Definition, flow: ^Type
 	location := definition.parsed.location
 	flow := flow
 	for part in definition.pipe {
-		procedure, ok := program.names[part.name].(^Procedure)
+		first, ok := program.names[part.name].(^Procedure)
 		if !ok do fail(location, "%s is not a proc", part.name)
+		procedure := resolve_procedure(program, first, flow, location)
 		if procedure.foreign_name != "" do fail(location, "%s calls C, a value cannot", part.name)
 		check_procedure(program, procedure)
 		if len(procedure.access.writes) > 0 do fail(location, "%s writes state, a value cannot", part.name)
@@ -215,6 +219,31 @@ check_value_pipe :: proc(program: ^Program, definition: ^Definition, flow: ^Type
 		merge_access(&definition.access, procedure.access)
 	}
 	return flow
+}
+
+check_overloads :: proc(first: ^Procedure) {
+	for procedure := first; procedure != nil; procedure = procedure.next_overload {
+		for other := procedure.next_overload; other != nil; other = other.next_overload {
+			if fed_slot(procedure).type == fed_slot(other).type {
+				fail(other.parsed.location, "%s already takes %s", other.name, fed_slot(other).type.name)
+			}
+		}
+	}
+}
+
+// The slot the flowing value feeds.
+fed_slot :: proc(procedure: ^Procedure) -> ^Slot {
+	return procedure.input if procedure.input != nil else procedure.output
+}
+
+// The proc of this name that takes `flow`: the exact type first, else the only one.
+resolve_procedure :: proc(program: ^Program, first: ^Procedure, flow: ^Type, location: Location) -> ^Procedure {
+	if !first.overloaded do return first
+	for procedure := first; procedure != nil; procedure = procedure.next_overload {
+		check_procedure(program, procedure)
+		if fed_slot(procedure).type == flow do return procedure
+	}
+	fail(location, "no %s takes %s", first.name, flow.name)
 }
 
 check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
@@ -495,8 +524,9 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 			}
 			switch found in program.names[part.name] {
 			case ^Procedure:
-				flow = check_call(program, found, flow, destination, row_table, location)
-				merge_access(access, found.access)
+				procedure := resolve_procedure(program, found, flow, location)
+				flow = check_call(program, procedure, flow, destination, row_table, location)
+				merge_access(access, procedure.access)
 			case ^Match:
 				if !found.has_pipes do fail(location, "%s is a value, not a proc", part.name)
 				check_match(program, found)
@@ -519,7 +549,7 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 }
 
 check_call :: proc(program: ^Program, procedure: ^Procedure, flow: ^Type, destination: ^Part, row_table: ^Type, location: Location) -> ^Type {
-	fed := procedure.input if procedure.input != nil else procedure.output
+	fed := fed_slot(procedure)
 	if !accepts(fed.type, flow) do fail(location, "%s takes %s, got %s", procedure.name, fed.type.name, flow.name)
 	if procedure.output == nil do return flow
 	if destination != nil {

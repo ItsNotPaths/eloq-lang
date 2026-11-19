@@ -1,0 +1,27 @@
+Vector2 :: [2]float
+Vector3 :: [3]float
+
+crates :: table 4
+	weight : float
+
+state inline_c
+	flat      := Vector2{3, 4}
+	deep      := Vector3{0, 0, 2}
+	flat_unit := Vector2{0, 0}
+	deep_unit := Vector3{0, 0, 0}
+
+normalize :: foreign Vector2 |proc| Vector2
+	float length = sqrtf(input.x * input.x + input.y * input.y);
+	return (Vector2){{ input.x / length, input.y / length }};
+
+normalize :: foreign Vector3 |proc| Vector3
+	float length = sqrtf(input.x * input.x + input.y * input.y + input.z * input.z);
+	return (Vector3){{ input.x / length, input.y / length, input.z / length }};
+
+double_weights :: foreign crates |proc| crates
+	// a loop, which eloq leaves to C
+	for (int row = 0; row < input->count; row += 1) input->weight[row] *= 2;
+
+flat   |normalize|      flat_unit
+deep   |normalize|      deep_unit
+crates |double_weights| crates

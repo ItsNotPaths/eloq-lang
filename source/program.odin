@@ -81,6 +81,7 @@ Procedure :: struct {
 	name:   string,
 	parsed: Parsed,
 	foreign_name: string, // a C function: never sees the state
+	inline_c:     string, // the body of a foreign proc written in place, with `input` as its parameter
 	foreign_types: [2]^ast.Expr, // input, output (nil when void)
 	slots:  [dynamic]Slot,
 	input:  ^Slot, // the read-only slot
@@ -266,7 +267,7 @@ add_definition :: proc(program: ^Program, item: Item) {
 	case strings.has_prefix(rest, "table "):
 		add_table(program, name, rest, item)
 	case strings.has_prefix(rest, "foreign "):
-		add_foreign(program, name, rest, location)
+		add_foreign(program, name, rest, item)
 	case strings.has_prefix(rest, "|"):
 		add_proc_pipe(program, name, rest, location)
 	case strings.has_suffix(rest, "|"):
@@ -307,13 +308,22 @@ add_table :: proc(program: ^Program, name: string, header: string, item: Item) {
 }
 
 // `name :: foreign "c_name" Input |proc| Output`, Output left out for void.
-add_foreign :: proc(program: ^Program, name: string, header: string, location: Location) {
+// `foreign "c_name" Input |proc| Output` links a C function. Without the name, the C
+// is the indented body: `foreign Vector3 |proc| Vector3`.
+add_foreign :: proc(program: ^Program, name: string, header: string, item: Item) {
+	location := item.header.location
 	rest := strings.trim_space(header[len("foreign "):])
-	if !strings.has_prefix(rest, "\"") do fail(location, "foreign needs the C name in quotes")
-	end := strings.index_byte(rest[1:], '"')
-	if end < 1 do fail(location, "foreign needs the C name in quotes")
-	procedure := new_clone(Procedure{name = name, foreign_name = rest[1:][:end]})
-	input_text, separator, output_text := strings.partition(rest[end + 2:], "|proc|")
+	procedure := new_clone(Procedure{name = name})
+	if strings.has_prefix(rest, "\"") {
+		end := strings.index_byte(rest[1:], '"')
+		if end < 1 do fail(location, "foreign needs the C name in quotes")
+		procedure.foreign_name = rest[1:][:end]
+		rest = rest[end + 2:]
+	} else {
+		procedure.foreign_name = strings.concatenate({"c_", name})
+		procedure.inline_c, _ = body_text(item)
+	}
+	input_text, separator, output_text := strings.partition(rest, "|proc|")
 	if separator == "" do fail(location, "foreign is written: foreign \"c_name\" Input |proc| Output")
 	procedure.parsed.location = location
 	procedure.foreign_types[0], _ = parse_expression(strings.trim_space(input_text), location)

@@ -61,7 +61,12 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	}
 	for match in value_matches do emit_value_match(program, out, match, state_type)
 	for procedure in program.procedures {
-		if procedure.foreign_name == "" do emit_procedure(program, out, procedure, state_type)
+		switch {
+		case procedure.inline_c != "":
+			fmt.sbprintf(out, "\n%s {{\n\t(void)input;\n%s\n}}\n", foreign_signature(procedure), procedure.inline_c)
+		case procedure.foreign_name == "":
+			emit_procedure(program, out, procedure, state_type)
+		}
 	}
 
 	fmt.sbprintf(out, "\nvoid %s_init(%s *state) {{\n\t*state = (%s){{0}};\n", program.state_name, state_type, state_type)
@@ -353,11 +358,16 @@ procedure_c_name :: proc(procedure: ^Procedure) -> string {
 }
 
 foreign_signature :: proc(procedure: ^Procedure) -> string {
+	return_type := c_type_name(procedure.output.type) if procedure.output != nil else "void"
+	if procedure.inline_c != "" {
+		input := procedure.input.type
+		pointer := " *" if input.kind == .Table else " "
+		return fmt.aprintf("static inline %s %s(%s%sinput)", return_type, procedure.foreign_name, c_type_name(input), pointer)
+	}
 	parameters: [dynamic]string
 	for argument in foreign_arguments(procedure.input.type, "") {
 		append(&parameters, strings.concatenate({c_type_name(argument.type), " *" if argument.type.kind == .Table else ""}))
 	}
-	return_type := c_type_name(procedure.output.type) if procedure.output != nil else "void"
 	return fmt.aprintf("%s %s(%s)", return_type, procedure.foreign_name, strings.join(parameters[:], ", "))
 }
 
@@ -666,6 +676,7 @@ next_flow :: proc(emitter: ^Line_Emitter) -> string {
 }
 
 procedure_call :: proc(program: ^Program, procedure: ^Procedure, flow_variable: string, destination: ^Part, row_table: ^Type, line_cached: ^map[string]bool) -> string {
+	if procedure.inline_c != "" do return fmt.aprintf("%s(%s)", procedure.foreign_name, flow_variable)
 	if procedure.foreign_name != "" {
 		values: [dynamic]string
 		for argument in foreign_arguments(procedure.input.type, "") {

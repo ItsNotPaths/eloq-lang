@@ -333,6 +333,9 @@ check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 
 check_foreign :: proc(program: ^Program, procedure: ^Procedure) {
 	scope := Scope{parsed = &procedure.parsed}
+	defer if procedure.inline_c != "" && procedure.overloaded {
+		procedure.foreign_name = fmt.aprintf("c_%s_%s", procedure.name, c_type_name(procedure.input.type))
+	}
 	if table := table_named(program, procedure.foreign_types[0]); table != nil {
 		check_table_foreign(program, procedure, table)
 		return

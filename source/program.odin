@@ -219,6 +219,9 @@ add_definition :: proc(program: ^Program, item: Item) {
 		add_table(program, name, rest, item)
 	case strings.has_prefix(rest, "foreign "):
 		add_foreign(program, name, rest, location)
+	// (hole pipe-values :tags types) a value defined by a pipe, `enemies[target].position |length|`, is not parsed.
+	case strings.has_suffix(rest, "|"):
+		fail(location, "values defined by a pipe are not built yet")
 	case:
 		add_declaration(program, item.header.text, location)
 	}

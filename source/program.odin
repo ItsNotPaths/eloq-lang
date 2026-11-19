@@ -254,6 +254,9 @@ add_definition :: proc(program: ^Program, item: Item) {
 		add_table(program, name, rest, item)
 	case strings.has_prefix(rest, "foreign "):
 		add_foreign(program, name, rest, location)
+	// (hole pipe-procs :tags types) a proc defined by a pipe, `length :: |length_squared| |sqrt|`, is not parsed.
+	case strings.has_prefix(rest, "|"):
+		fail(location, "procs defined by a pipe are not built yet")
 	case strings.has_suffix(rest, "|"):
 		add_value_pipe(program, name, rest, location)
 	case:

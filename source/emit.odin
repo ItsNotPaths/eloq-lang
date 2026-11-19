@@ -514,7 +514,6 @@ Line_Emitter :: struct {
 
 // A line over a table is a loop over its rows. A gate skips to the next row.
 // (hole intermediate-logging :tags tooling :sev polish) no way to log every named intermediate of a line.
-// (hole parallel-lines :tags codegen) lines with disjoint write sets still run one after another.
 emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string, cached: ^map[string]bool) {
 	parts := line.parts[:]
 	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, flow_is_row = line.row_table != nil && table_named(program, parts[0].expression) == line.row_table, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}

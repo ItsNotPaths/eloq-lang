@@ -410,6 +410,7 @@ gather_names :: proc(expression: ^ast.Expr, program: ^Program = nil) -> [dynamic
 	return names
 }
 
+// (hole math-procs :tags math :needs pipe-procs) C math is a call in expressions; should be reserved procs |sqrt| |atan2|, overloaded for float, double and arrays.
 // C math, by its double name. A float argument calls the `f` version.
 math_arity :: proc(name: string) -> int {
 	switch name {

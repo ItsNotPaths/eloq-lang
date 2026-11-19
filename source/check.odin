@@ -3,6 +3,7 @@ package eloqc
 import "core:fmt"
 import "core:odin/ast"
 import "core:reflect"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 
@@ -24,6 +25,7 @@ check_program :: proc(program: ^Program) {
 	for field in program.fields do check_field(program, field)
 	for definition in program.definitions do check_definition(program, definition)
 	for procedure in program.procedures do check_procedure(program, procedure)
+	for match in program.matches do check_match(program, match)
 	for &line in program.lines do check_line(program, &line)
 }
 
@@ -129,7 +131,7 @@ check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 			slot.type = found
 		case ^Field:
 			slot.type = found.type
-		case ^Definition, ^Procedure, nil:
+		case ^Definition, ^Procedure, ^Match, nil:
 			fail(location, "slot %s must be labeled with a type or a state name", slot.name)
 		}
 		switch {
@@ -235,45 +237,65 @@ check_line :: proc(program: ^Program, line: ^Line) {
 	}
 	scope := Scope{parsed = &parts[0].parsed}
 	flow := default_type(type_of(program, &scope, parts[0].expression))
+	check_parts(program, parts[1:], flow, nil, line.location)
+}
 
-	for &part, index in parts[1:] {
-		scope = Scope{parsed = &part.parsed, flow_type = flow}
+// Checks parts fed with `flow` and returns what flows out. `outer` is where output
+// lands when the parts run out, for match arms.
+check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part, location: Location) -> ^Type {
+	flow := flow
+	for &part, index in parts {
+		scope := Scope{parsed = &part.parsed, flow_type = flow}
 		switch part.kind {
 		case .Gate:
 			if gate_type := type_of(program, &scope, part.expression); gate_type.kind != .Boolean {
-				fail(line.location, "a gate needs a bool, got %s", gate_type.name)
+				fail(location, "a gate needs a bool, got %s", gate_type.name)
 			}
 		case .Data:
-			check_target(program, &scope, part.expression, line.location)
+			check_target(program, &scope, part.expression, location)
 			if target_type := type_of(program, &scope, part.expression); target_type != flow {
-				fail(line.location, "cannot write %s to %s", flow.name, target_type.name)
+				fail(location, "cannot write %s to %s", flow.name, target_type.name)
 			}
 		case .Procedure:
-			procedure := find_procedure(program, part.name, line.location)
-			fed := procedure.input if procedure.input != nil else procedure.output
-			if fed.type != flow {
-				fail(line.location, "%s takes %s, got %s", part.name, fed.type.name, flow.name)
-			}
-			if procedure.output == nil do continue
-			if destination := destination_of(parts[1:][index + 1:]); destination != nil {
-				destination_scope := Scope{parsed = &destination.parsed}
-				if type_of(program, &destination_scope, destination.expression) != procedure.output.type {
-					fail(line.location, "%s gives %s, which does not fit its destination", part.name, procedure.output.type.name)
+			destination := destination_of(parts[index + 1:], outer)
+			switch found in program.names[part.name] {
+			case ^Procedure:
+				flow = check_call(program, found, flow, destination, location)
+			case ^Match:
+				if !found.has_pipes do fail(location, "%s is a value, not a proc", part.name)
+				check_match(program, found)
+				output: ^Type
+				for &arm in found.arms {
+					arm_output := check_parts(program, arm.parts[:], flow, destination, arm.location)
+					if output != nil && arm_output != output {
+						fail(arm.location, "arms of %s give %s and %s", part.name, output.name, arm_output.name)
+					}
+					output = arm_output
 				}
+				flow = output
+			case ^Type, ^Field, ^Definition, nil:
+				fail(location, "%s is not a proc", part.name)
 			}
-			flow = procedure.output.type
 		}
 	}
+	return flow
 }
 
-find_procedure :: proc(program: ^Program, name: string, location: Location) -> ^Procedure {
-	procedure, ok := program.names[name].(^Procedure)
-	if !ok do fail(location, "%s is not a proc", name)
-	return procedure
+check_call :: proc(program: ^Program, procedure: ^Procedure, flow: ^Type, destination: ^Part, location: Location) -> ^Type {
+	fed := procedure.input if procedure.input != nil else procedure.output
+	if fed.type != flow do fail(location, "%s takes %s, got %s", procedure.name, fed.type.name, flow.name)
+	if procedure.output == nil do return flow
+	if destination != nil {
+		scope := Scope{parsed = &destination.parsed}
+		if type_of(program, &scope, destination.expression) != procedure.output.type {
+			fail(location, "%s gives %s, which does not fit its destination", procedure.name, procedure.output.type.name)
+		}
+	}
+	return procedure.output.type
 }
 
 // The data a proc's output lands in: the next data part, past any gates.
-destination_of :: proc(rest: []Part) -> ^Part {
+destination_of :: proc(rest: []Part, outer: ^Part) -> ^Part {
 	for &part in rest {
 		switch part.kind {
 		case .Gate:
@@ -284,7 +306,57 @@ destination_of :: proc(rest: []Part) -> ^Part {
 			return nil
 		}
 	}
-	return nil
+	return outer
+}
+
+check_match :: proc(program: ^Program, match: ^Match) {
+	switch match.status {
+	case .Checked:
+		return
+	case .Checking:
+		fail(match.location, "%s is defined in terms of itself", match.name)
+	case .Unchecked:
+	}
+	match.status = .Checking
+	scope := Scope{parsed = &match.parsed}
+	subject := default_type(type_of(program, &scope, match.subject))
+	match.subject_type = subject
+	cases: []string
+	#partial switch subject.kind {
+	case .Enum:
+		cases = subject.cases[:]
+	case .Boolean:
+		cases = {"true", "false"}
+	case:
+		fail(match.location, "a match needs an enum or bool, got %s", subject.name)
+	}
+
+	covered: map[string]bool
+	for arm, index in match.arms {
+		if arm.label == "else" {
+			if index != len(match.arms) - 1 do fail(arm.location, "else must be the last arm")
+			for name in cases do covered[name] = true
+			continue
+		}
+		if !slice.contains(cases, arm.label) do fail(arm.location, "%s has no case %s", subject.name, arm.label)
+		if covered[arm.label] do fail(arm.location, "case %s twice", arm.label)
+		covered[arm.label] = true
+	}
+	for name in cases {
+		if !covered[name] do fail(match.location, "%s misses case %s", match.name, name)
+	}
+
+	if !match.has_pipes {
+		for &arm in match.arms {
+			arm_scope := Scope{parsed = &arm.parsed}
+			arm_type := type_of(program, &arm_scope, arm.value)
+			match.type = arm_type if match.type == nil else unify(match.type, arm_type, arm.location)
+			scope.touches_state ||= arm_scope.touches_state
+		}
+		match.type = default_type(match.type)
+	}
+	match.touches_state = scope.touches_state
+	match.status = .Checked
 }
 
 check_target :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr, location: Location) {
@@ -480,6 +552,11 @@ type_of_name :: proc(program: ^Program, scope: ^Scope, name: string, location: L
 	case ^Definition:
 		check_definition(program, found)
 		if !found.constant do scope.touches_state = true
+		return found.type
+	case ^Match:
+		if found.has_pipes do fail(location, "%s is a proc, not a value", name)
+		check_match(program, found)
+		scope.touches_state = true
 		return found.type
 	case ^Type, ^Procedure:
 		fail(location, "%s is not a value", name)

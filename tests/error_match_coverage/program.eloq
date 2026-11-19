@@ -1,0 +1,17 @@
+Fuel_State :: enum
+	full
+	low
+	empty
+
+state coverage
+	fuel_state := Fuel_State.low
+	thrust_now := 0.0
+
+thrust :: ?fuel_state?
+	full : 100.0
+	low  : 40.0
+
+set_thrust ::
+	$float = thrust
+
+thrust_now |set_thrust| thrust_now

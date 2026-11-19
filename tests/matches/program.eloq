@@ -1,0 +1,53 @@
+Fuel_State :: enum
+	full
+	low
+	empty
+
+state matches
+	fuel_state := Fuel_State.low
+	flag       := true
+	thrust_now := 0.0
+	flag_word  := 0
+	speed      := 10.0
+	braked     := 0.0
+	moved      := 0.0
+
+thrust :: ?fuel_state?
+	full  : 100.0
+	low   : 40.0
+	empty : 0.0
+
+word :: ¿flag?
+	true : 1
+	else : 2
+
+set_thrust ::
+	$float = thrust
+
+set_word ::
+	$int = word
+
+halve ::
+	$float = float * 0.5
+
+stop ::
+	$float = 0
+
+add_one ::
+	$float = float + 1
+
+move ::
+	$moved = moved + $float
+
+brake :: ?fuel_state?
+	full : |add_one|
+	else : |halve| ?> 100? |stop|
+
+drift :: ?fuel_state?
+	low  : |move|
+	else : |add_one|
+
+thrust_now |set_thrust| thrust_now
+flag_word  |set_word|   flag_word
+speed      |brake|      braked
+speed      |drift|      moved

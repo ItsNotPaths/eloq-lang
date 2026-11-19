@@ -67,11 +67,35 @@ Procedure :: struct {
 	touches_state: bool,
 }
 
+// `name :: ?subject?` with one arm per case. Value arms make an on-demand value,
+// pipe arms make a proc.
+Match :: struct {
+	name:          string,
+	location:      Location,
+	subject:       ^ast.Expr,
+	parsed:        Parsed,
+	arms:          [dynamic]Arm,
+	has_pipes:     bool,
+	subject_type:  ^Type,
+	type:          ^Type, // value matches
+	touches_state: bool,
+	status:        Check_Status,
+}
+
+Arm :: struct {
+	label:    string, // a case, or "else"
+	location: Location,
+	value:    ^ast.Expr,
+	parsed:   Parsed,
+	parts:    [dynamic]Part,
+}
+
 Name :: union {
 	^Type,
 	^Field,
 	^Definition,
 	^Procedure,
+	^Match,
 }
 
 Program :: struct {
@@ -82,6 +106,7 @@ Program :: struct {
 	fields:         [dynamic]^Field, // the state
 	definitions:    [dynamic]^Definition,
 	procedures:     [dynamic]^Procedure,
+	matches:        [dynamic]^Match,
 	lines:          [dynamic]Line,
 }
 
@@ -172,11 +197,42 @@ add_definition :: proc(program: ^Program, item: Item) {
 		type := new_clone(Type{name = name, kind = .Enum, location = location})
 		for entry in body_entries(item) do append(&type.cases, entry.text)
 		add_type(program, type)
-	case strings.has_prefix(rest, "table"), strings.has_prefix(rest, "foreign"), strings.has_prefix(rest, "?"), strings.has_prefix(rest, GATE_OPENER):
+	case strings.has_prefix(rest, "?"), strings.has_prefix(rest, GATE_OPENER):
+		add_match(program, name, rest, item)
+	case strings.has_prefix(rest, "table"), strings.has_prefix(rest, "foreign"):
 		fail(location, "%s: not built yet", rest)
 	case:
 		add_declaration(program, item.header.text, location)
 	}
+}
+
+add_match :: proc(program: ^Program, name: string, header: string, item: Item) {
+	location := item.header.location
+	opener := header[0] == '?' ? 1 : len(GATE_OPENER)
+	if !strings.has_suffix(header, "?") do fail(location, "match subject missing its closing ?")
+	match := new_clone(Match{name = name, location = location})
+	match.subject, match.parsed = parse_expression(strings.trim_space(header[opener:len(header) - 1]), location)
+
+	for entry in body_entries(item) {
+		label, separator, rest := strings.partition(entry.text, ":")
+		if separator == "" do fail(entry, "a match arm is `case : value` or `case : |pipe|`")
+		arm := Arm{label = strings.trim_space(label), location = entry.location}
+		rest = strings.trim_space(rest)
+		if strings.has_prefix(rest, "|") || strings.has_prefix(rest, "?") || strings.has_prefix(rest, GATE_OPENER) {
+			arm.parts = parse_line({entry.location, rest}).parts
+			match.has_pipes = true
+		} else {
+			arm.value, arm.parsed = parse_expression(rest, entry)
+		}
+		append(&match.arms, arm)
+	}
+	if len(match.arms) == 0 do fail(location, "%s has no arms", name)
+	for arm in match.arms {
+		if (arm.value == nil) == match.has_pipes do continue
+		fail(arm.location, "arms of %s must all be values or all be pipes", name)
+	}
+	add_name(program, name, match, location)
+	append(&program.matches, match)
 }
 
 add_type :: proc(program: ^Program, type: ^Type) {

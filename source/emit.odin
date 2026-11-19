@@ -28,8 +28,8 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	fmt.sbprintf(out, "typedef struct {{\n")
 	for field in program.fields do fmt.sbprintf(out, "\t%s %s;\n", c_type_name(field.type), field.name)
 	fmt.sbprintf(out, "\t%ss abends;\n}} %s;\n\n", abend_type, state_type)
-	fmt.sbprintf(out, "void %s_init(%s *state);\n", program.state_name, state_type)
-	fmt.sbprintf(out, "int %s(%s *state);\n\n#endif\n", program.state_name, state_type)
+	fmt.sbprintf(out, "void %s_init(%s *restrict state);\n", program.state_name, state_type)
+	fmt.sbprintf(out, "int %s(%s *restrict state);\n\n#endif\n", program.state_name, state_type)
 
 	source_builder := strings.builder_make()
 	out = &source_builder
@@ -69,7 +69,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 		}
 	}
 
-	fmt.sbprintf(out, "\nvoid %s_init(%s *state) {{\n\t*state = (%s){{0}};\n", program.state_name, state_type, state_type)
+	fmt.sbprintf(out, "\nvoid %s_init(%s *restrict state) {{\n\t*state = (%s){{0}};\n", program.state_name, state_type, state_type)
 	for field in program.fields {
 		if field.initial == nil do continue
 		scope := Scope{parsed = &field.parsed}
@@ -78,7 +78,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 		fmt.sbprintf(out, ";\n")
 	}
 	fmt.sbprintf(out, "}}\n\n")
-	fmt.sbprintf(out, "int %s(%s *state) {{\n\tstate->abends.count = 0;\n\tstate->abends.dropped = 0;\n", program.state_name, state_type)
+	fmt.sbprintf(out, "int %s(%s *restrict state) {{\n\tstate->abends.count = 0;\n\tstate->abends.dropped = 0;\n", program.state_name, state_type)
 	for field in program.fields {
 		emit_state_checks(out, field.type, fmt.aprintf("state->%s", field.name), upper_name, field.location.line, "-1", 1)
 	}
@@ -132,11 +132,11 @@ ABEND_CAPACITY :: 16
 
 // Codes land in state->abends in the order they happen. A stop drops pending removes.
 emit_abend_procs :: proc(out: Output, tables: [dynamic]^Type, abend_type, state_type: string) {
-	parameters := fmt.aprintf("%s *state, %s code, int line, int row, int value", state_type, abend_type)
+	parameters := fmt.aprintf("%s *restrict state, %s code, int line, int row, int value", state_type, abend_type)
 	fmt.sbprintf(out, "static inline void record_abend(%s) {{\n", parameters)
 	fmt.sbprintf(out, "\tif (state->abends.count == %d) {{\n\t\tstate->abends.dropped += 1;\n\t\treturn;\n\t}}\n", ABEND_CAPACITY)
 	fmt.sbprintf(out, "\tstate->abends.entries[state->abends.count++] = (%s_Entry){{code, line, row, value}};\n}}\n\n", abend_type)
-	fmt.sbprintf(out, "static inline int stop_step(%s *state) {{\n", state_type)
+	fmt.sbprintf(out, "static inline int stop_step(%s *restrict state) {{\n", state_type)
 	for table in tables {
 		if table.appends do fmt.sbprintf(out, "\tstate->%s.added = 0;\n", table.name)
 		if table.removes do fmt.sbprintf(out, "\tmemset(state->%s.removed, 0, sizeof state->%s.removed);\n", table.name, table.name)
@@ -213,7 +213,7 @@ on_demand_values :: proc(program: ^Program) -> [dynamic]^Definition {
 
 value_signature :: proc(name: string, type: ^Type, row_table: ^Type, writable: bool, state_type: string) -> string {
 	row := ", int row" if row_table != nil else ""
-	return fmt.aprintf("static inline %s value_%s(%s%s *state%s)", c_type_name(type), name, "" if writable else "const ", state_type, row)
+	return fmt.aprintf("static inline %s value_%s(%s%s *restrict state%s)", c_type_name(type), name, "" if writable else "const ", state_type, row)
 }
 
 // A value that indexes can record an abcont, and procs take state as writable.
@@ -366,12 +366,12 @@ foreign_signature :: proc(procedure: ^Procedure) -> string {
 	return_type := c_type_name(procedure.output.type) if procedure.output != nil else "void"
 	if procedure.inline_c != "" {
 		input := procedure.input.type
-		pointer := " *" if input.kind == .Table else " "
+		pointer := " *restrict " if input.kind == .Table else " "
 		return fmt.aprintf("static inline %s %s(%s%sinput)", return_type, procedure.foreign_name, c_type_name(input), pointer)
 	}
 	parameters: [dynamic]string
 	for argument in foreign_arguments(procedure.input.type, "") {
-		append(&parameters, strings.concatenate({c_type_name(argument.type), " *" if argument.type.kind == .Table else ""}))
+		append(&parameters, strings.concatenate({c_type_name(argument.type), " *restrict" if argument.type.kind == .Table else ""}))
 	}
 	return fmt.aprintf("%s %s(%s)", return_type, procedure.foreign_name, strings.join(parameters[:], ", "))
 }
@@ -396,11 +396,10 @@ foreign_arguments :: proc(type: ^Type, path: string) -> [dynamic]Foreign_Argumen
 
 // Parameters: the read-only slot, the written slot, then the cached values it reads.
 // Returns the written slot.
-// (hole restrict-pointers :tags codegen) no restrict on pointers whose arrays the write sets prove apart.
 procedure_signature :: proc(program: ^Program, procedure: ^Procedure, state_type: string) -> string {
 	builder := strings.builder_make()
 	return_type := procedure.output != nil ? c_type_name(procedure.output.type) : "void"
-	fmt.sbprintf(&builder, "static inline %s %s(%s *state", return_type, procedure_c_name(procedure), state_type)
+	fmt.sbprintf(&builder, "static inline %s %s(%s *restrict state", return_type, procedure_c_name(procedure), state_type)
 	for slot in ([]^Slot{procedure.input, procedure.output}) {
 		if slot != nil do fmt.sbprintf(&builder, ", %s slot_%s", c_type_name(slot.type), slot.name)
 	}
@@ -540,6 +539,8 @@ emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper
 		return
 	}
 	outer_indent := emitter.indent
+	// (hole hoist-read-fields :tags codegen) state fields a row loop only reads are loaded each row; gcc versions the loop for aliasing (row may leave its column).
+	// (hole element-copies :tags codegen) array columns move as whole-union copies; gcc does not vectorize those (`|fall|` writing .y only).
 	if line.row_table != nil {
 		fmt.sbprintf(out, "%sfor (int row = 0; row < state->%s.count; row += 1) {{\n", emitter.indent, line.row_table.name)
 		emitter.indent = strings.concatenate({emitter.indent, "\t"})

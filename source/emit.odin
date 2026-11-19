@@ -229,6 +229,13 @@ emit_value_pipe :: proc(program: ^Program, scope: ^Scope, out: Output, definitio
 	flow_variable := "flow_1"
 	no_cache: map[string]bool
 	for part, index in definition.pipe {
+		if math_arity(part.name) > 0 {
+			call := math_call(part.name, flow, flow_variable)
+			flow = check_math(part.name, flow, {})
+			flow_variable = fmt.aprintf("flow_%d", index + 2)
+			fmt.sbprintf(out, "\t%s %s = %s;\n", c_type_name(flow), flow_variable, call)
+			continue
+		}
 		procedure := resolve_procedure(program, program.names[part.name].(^Procedure), flow, definition.parsed.location)
 		call := procedure_call(program, procedure, flow_variable, nil, definition.row_table, &no_cache)
 		if procedure.output == nil {
@@ -301,8 +308,6 @@ gather_index_checks :: proc(program: ^Program, scope: ^Scope, expression: ^ast.E
 		for element in node.elems do gather_index_checks(program, scope, element, checks)
 	case ^ast.Field_Value:
 		gather_index_checks(program, scope, node.value, checks)
-	case ^ast.Call_Expr:
-		for argument in node.args do gather_index_checks(program, scope, argument, checks)
 	}
 }
 
@@ -602,6 +607,13 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 			}
 		case .Procedure:
 			destination := destination_of(parts[index + 1:], outer)
+			if math_arity(part.name) > 0 {
+				call := math_call(part.name, flow, flow_variable)
+				flow = check_math(part.name, flow, {})
+				flow_variable = next_flow(emitter)
+				fmt.sbprintf(out, "%s%s %s = %s;\n", indent, c_type_name(flow), flow_variable, call)
+				continue
+			}
 			if part.name == "remove" {
 				fmt.sbprintf(out, "%sstate->%s.removed[row] = 1;\n", indent, emitter.row_table.name)
 				continue
@@ -893,22 +905,34 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 			emit_expression(program, scope, out, field_value.value, field.type)
 		}
 		fmt.sbprintf(out, " }}")
-	case ^ast.Call_Expr:
-		name := node.expr.derived.(^ast.Ident).name
-		scalar := type.element if type.kind == .Array else type
-		fmt.sbprintf(out, "%s%s(", name, "f" if scalar.name == "float" else "")
-		for argument, index in node.args {
-			if index > 0 do fmt.sbprintf(out, ", ")
-			emit_expression(program, scope, out, argument, type, element)
-		}
-		fmt.sbprintf(out, ")")
 	}
+}
+
+// `|sqrt|` on a float is sqrtf(flow), on an array one call per element.
+math_call :: proc(name: string, flow: ^Type, flow_variable: string) -> string {
+	if math_arity(name) == 1 {
+		if flow.kind != .Array do return fmt.aprintf("%s%s(%s)", name, math_suffix(flow), flow_variable)
+		calls: [dynamic]string
+		for index in 0 ..< flow.count {
+			append(&calls, fmt.aprintf("%s%s(%s%s)", name, math_suffix(flow.element), flow_variable, element_access(flow, index)))
+		}
+		return fmt.aprintf("(%s){{{{ %s }}}}", c_type_name(flow), strings.join(calls[:], ", "))
+	}
+	values: [2]string
+	for index in 0 ..< 2 {
+		values[index] = strings.concatenate({flow_variable, element_access(flow, index) if flow.kind == .Array else strings.concatenate({".", flow.fields[index].name})})
+	}
+	return fmt.aprintf("%s%s(%s, %s)", name, math_suffix(math_values(flow)[0]), values[0], values[1])
+}
+
+math_suffix :: proc(scalar: ^Type) -> string {
+	return "f" if scalar.name == "float" else ""
 }
 
 // Expressions that are built per element, rather than read whole.
 distributes :: proc(expression: ^ast.Expr) -> bool {
 	#partial switch node in expression.derived {
-	case ^ast.Binary_Expr, ^ast.Unary_Expr, ^ast.Comp_Lit, ^ast.Basic_Lit, ^ast.Call_Expr:
+	case ^ast.Binary_Expr, ^ast.Unary_Expr, ^ast.Comp_Lit, ^ast.Basic_Lit:
 		return true
 	case ^ast.Paren_Expr:
 		return distributes(node.expr)

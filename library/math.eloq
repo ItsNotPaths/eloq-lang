@@ -6,20 +6,25 @@ Vector4 :: [4]float
 pi  :: 3.14159265358979323846
 tau :: 6.28318530717958647692
 
-length ::
-	$float = sqrt($Vector2.x * Vector2.x + Vector2.y * Vector2.y)
+length_squared ::
+	$float = $Vector2.x * Vector2.x + Vector2.y * Vector2.y
 
-length ::
-	$float = sqrt($Vector3.x * Vector3.x + Vector3.y * Vector3.y + Vector3.z * Vector3.z)
+length_squared ::
+	$float = $Vector3.x * Vector3.x + Vector3.y * Vector3.y + Vector3.z * Vector3.z
 
-length ::
-	$float = sqrt($Vector4.x * Vector4.x + Vector4.y * Vector4.y + Vector4.z * Vector4.z + Vector4.w * Vector4.w)
+length_squared ::
+	$float = $Vector4.x * Vector4.x + Vector4.y * Vector4.y + Vector4.z * Vector4.z + Vector4.w * Vector4.w
 
-normalize ::
-	$Vector2 = Vector2 / sqrt(Vector2.x * Vector2.x + Vector2.y * Vector2.y)
+length :: |length_squared| |sqrt|
 
-normalize ::
-	$Vector3 = Vector3 / sqrt(Vector3.x * Vector3.x + Vector3.y * Vector3.y + Vector3.z * Vector3.z)
+normalize :: foreign Vector2 |proc| Vector2
+	float length = sqrtf(input.x * input.x + input.y * input.y);
+	return (Vector2){{ input.x / length, input.y / length }};
 
-normalize ::
-	$Vector4 = Vector4 / sqrt(Vector4.x * Vector4.x + Vector4.y * Vector4.y + Vector4.z * Vector4.z + Vector4.w * Vector4.w)
+normalize :: foreign Vector3 |proc| Vector3
+	float length = sqrtf(input.x * input.x + input.y * input.y + input.z * input.z);
+	return (Vector3){{ input.x / length, input.y / length, input.z / length }};
+
+normalize :: foreign Vector4 |proc| Vector4
+	float length = sqrtf(input.x * input.x + input.y * input.y + input.z * input.z + input.w * input.w);
+	return (Vector4){{ input.x / length, input.y / length, input.z / length, input.w / length }};

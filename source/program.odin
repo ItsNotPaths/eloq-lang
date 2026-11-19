@@ -225,7 +225,7 @@ add_proc_pipe :: proc(program: ^Program, name: string, text: string, location: L
 }
 
 add_name :: proc(program: ^Program, name: string, value: Name, location: Location) {
-	if name == "remove" || name == "abends" do fail(location, "%s is built in", name)
+	if name == "remove" || name == "abends" || math_arity(name) > 0 do fail(location, "%s is built in", name)
 	if procedure, is_procedure := value.(^Procedure); is_procedure {
 		if first, is_first := program.names[name].(^Procedure); is_first {
 			if len(first.pipe) > 0 || len(procedure.pipe) > 0 do fail(location, "%s is a pipe, it cannot share its name", name)

@@ -1,5 +1,9 @@
 insert math
 
+Direction :: struct
+	y : float
+	x : float
+
 state math_use
 	velocity := Vector3{3, 4, 0}
 	speed    := 0.0
@@ -10,12 +14,19 @@ state math_use
 	flat     := Vector2{6, 8}
 	flat_speed := 0.0
 	flat_unit  := Vector2{0, 0}
+	root       := 0.0
 
-heading_angle ::
-	$float = atan2(velocity.y, velocity.x)
+to_direction ::
+	$Direction.y = $Vector3.y
+	Direction.x = Vector3.x
 
-round_all ::
-	$Vector3 = floor(Vector3 + 0.5)
+add_half ::
+	$Vector3 = Vector3 + 0.5
+
+copy_float ::
+	$float = float
+
+root_of_speed :: speed |sqrt|
 
 full_turn ::
 	$float = tau
@@ -24,6 +35,7 @@ velocity |length|        speed
 flat     |length|        flat_speed
 flat     |normalize|     flat_unit
 velocity |normalize|     unit
-angle    |heading_angle| angle
-rounded  |round_all|     rounded
+velocity |to_direction| |atan2| angle
+rounded  |add_half| |floor|    rounded
 circle   |full_turn|     circle
+root_of_speed |copy_float| root

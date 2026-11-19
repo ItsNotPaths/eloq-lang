@@ -237,10 +237,14 @@ check_value_pipe :: proc(program: ^Program, definition: ^Definition, flow: ^Type
 	location := definition.parsed.location
 	flow := flow
 	for part in definition.pipe {
+		if math_arity(part.name) > 0 {
+			flow = check_math(part.name, flow, location)
+			continue
+		}
 		first, ok := program.names[part.name].(^Procedure)
 		if !ok do fail(location, "%s is not a proc", part.name)
 		procedure := resolve_procedure(program, first, flow, location)
-		if procedure.foreign_name != "" do fail(location, "%s calls C, a value cannot", part.name)
+		if procedure.foreign_name != "" && procedure.inline_c == "" do fail(location, "%s calls linked C, a value cannot", part.name)
 		check_procedure(program, procedure)
 		if len(procedure.access.writes) > 0 do fail(location, "%s writes state, a value cannot", part.name)
 		flow = check_call(program, procedure, flow, nil, definition.row_table, location)
@@ -433,16 +437,13 @@ gather_names :: proc(expression: ^ast.Expr, program: ^Program = nil) -> [dynamic
 			for element in node.elems do gather(element, names, program)
 		case ^ast.Field_Value:
 			gather(node.value, names, program)
-		case ^ast.Call_Expr:
-			for argument in node.args do gather(argument, names, program)
 		}
 	}
 	gather(expression, &names, program)
 	return names
 }
 
-// (hole math-procs :tags math) C math is a call in expressions; should be reserved procs |sqrt| |atan2|, overloaded for float, double and arrays.
-// C math, by its double name. A float argument calls the `f` version.
+// C math procs, by the double name. A float flow calls the `f` version.
 math_arity :: proc(name: string) -> int {
 	switch name {
 	case "sqrt", "cbrt", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
@@ -452,6 +453,32 @@ math_arity :: proc(name: string) -> int {
 		return 2
 	}
 	return 0
+}
+
+// One value: float, double, or an array of them, per element. Two values: a struct or
+// array of two, in order. Returns what flows out.
+check_math :: proc(name: string, flow: ^Type, location: Location) -> ^Type {
+	if math_arity(name) == 1 {
+		scalar := flow.element if flow.kind == .Array else flow
+		if scalar.kind != .Float do fail(location, "%s takes float, double or an array of them, got %s", name, flow.name)
+		return flow
+	}
+	values := math_values(flow)
+	if len(values) != 2 || values[0].kind != .Float || values[0] != values[1] {
+		fail(location, "%s takes two floats or two doubles, as a struct or array, got %s", name, flow.name)
+	}
+	return values[0]
+}
+
+math_values :: proc(flow: ^Type) -> [dynamic]^Type {
+	types: [dynamic]^Type
+	#partial switch flow.kind {
+	case .Array:
+		for _ in 0 ..< flow.count do append(&types, flow.element)
+	case .Struct:
+		for field in flow.fields do append(&types, field.type)
+	}
+	return types
 }
 
 // `shells.count` is the rows at step start, `shells.added` the adds waiting on step end.
@@ -583,6 +610,10 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 			}
 		case .Procedure:
 			destination := destination_of(parts[index + 1:], outer)
+			if math_arity(part.name) > 0 {
+				flow = check_math(part.name, flow, location)
+				continue
+			}
 			if part.name == "remove" {
 				if row_table == nil || flow != row_table.row do fail(location, "remove takes a row of the table the line runs over")
 				row_table.removes = true
@@ -877,17 +908,7 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 			fail(location, "%s needs integers", node.op.text)
 		}
 	case ^ast.Call_Expr:
-		name, is_name := node.expr.derived.(^ast.Ident)
-		if !is_name do fail(location, "call a function by name")
-		arity := math_arity(name.name)
-		if arity == 0 do fail(location, "%s is not a function: calls are C math", name.name)
-		if len(node.args) != arity do fail(location, "%s takes %d values", name.name, arity)
-		result := type_of(program, scope, node.args[0])
-		for argument in node.args[1:] do result = arithmetic_type(result, type_of(program, scope, argument), location)
-		if result == untyped_integer do result = untyped_float
-		scalar := result.element if result.kind == .Array else result
-		if scalar.kind != .Float do fail(location, "%s takes float or double, got %s", name.name, result.name)
-		return result
+		fail(location, "expressions have no calls: pipe through a proc, like |sqrt|")
 	case ^ast.Comp_Lit:
 		if node.type == nil do fail(location, "name the type: Vector{1, 2, 3}")
 		type := resolve_type(program, scope, node.type)

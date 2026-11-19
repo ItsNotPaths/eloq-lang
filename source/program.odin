@@ -12,6 +12,7 @@ Type_Kind :: enum {
 	Enum,
 	Array,
 	Table, // fields are the columns, count the capacity
+	String, // Odin's shape, the host owns the text
 }
 
 Type :: struct {
@@ -144,7 +145,6 @@ builtin_type :: proc(name: string) -> ^Type {
 	return builtin_types[name]
 }
 
-// (hole opaque-strings :tags types) no built-in string {data, len}, no char type, no == on arrays.
 // Sizes are the common ones, for C's arithmetic conversions; the host's compiler decides the real ones.
 BUILTIN_TYPES :: [?]struct {
 	name: string,
@@ -154,6 +154,7 @@ BUILTIN_TYPES :: [?]struct {
 	{"float", .Float, 4},
 	{"double", .Float, 8},
 	{"bool", .Boolean, 1},
+	{"string", .String, 0},
 	{"int", .Integer, 4},
 	{"unsigned", .Integer, 4},
 	{"char", .Integer, 1},

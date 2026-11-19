@@ -1,0 +1,22 @@
+Tag :: [8]char
+
+state strings
+	name      : string
+	expected  : string
+	same_name := false
+	tag       : Tag
+	other_tag : Tag
+	same_tag  := false
+	letters   := 0
+
+name_matches :: name == expected
+tag_matches  :: tag == other_tag
+
+count_letters :: foreign "count_letters" string |proc| int
+
+copy_bool ::
+	$bool = bool
+
+name_matches |copy_bool|     same_name
+tag_matches  |copy_bool|     same_tag
+name         |count_letters| letters

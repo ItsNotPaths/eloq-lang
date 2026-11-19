@@ -16,6 +16,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	out := &header_builder
 	guard := strings.to_upper(strings.concatenate({header_name, "_H"}))
 	fmt.sbprintf(out, "#ifndef %s\n#define %s\n\n#include <stdbool.h>\n#include <stdint.h>\n#include <stddef.h>\n\n", guard, guard)
+	fmt.sbprintf(out, "#ifndef ELOQ_STRING\n#define ELOQ_STRING\ntypedef struct {{ const char *data; int len; }} String;\n#endif\n\n")
 	emitted: map[^Type]bool
 	for type in program.types do emit_type(out, type, &emitted)
 	for field in program.fields do emit_type(out, field.type, &emitted)
@@ -89,7 +90,7 @@ emit_type :: proc(out: Output, type: ^Type, emitted: ^map[^Type]bool) {
 	if type.builtin || type.untyped || emitted[type] do return
 	emitted[type] = true
 	switch type.kind {
-	case .Integer, .Float, .Boolean:
+	case .Integer, .Float, .Boolean, .String:
 	case .Enum:
 		fmt.sbprintf(out, "typedef int32_t %s;\nenum {{", type.name)
 		for name, index in type.cases {
@@ -189,6 +190,7 @@ c_type_name :: proc(type: ^Type) -> string {
 		return fmt.aprintf("Array_%d_%s", type.count, c_type_name(type.element))
 	}
 	if type.kind == .Table do return strings.concatenate({strings.to_ada_case(type.name), "_Table"})
+	if type.kind == .String do return "String"
 	return type.name
 }
 
@@ -859,6 +861,10 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 			emit_array_comparison(program, scope, out, node, operand_type)
 			return
 		}
+		if operand_type.kind == .String {
+			emit_string_comparison(program, scope, out, node)
+			return
+		}
 		fmt.sbprintf(out, "(")
 		emit_expression(program, scope, out, node.left, operand_type, element)
 		fmt.sbprintf(out, " %s ", node.op.text)
@@ -909,6 +915,15 @@ element_access :: proc(type: ^Type, index: int) -> string {
 	letters := ELEMENT_NAMES[0]
 	if type.count <= len(letters) do return fmt.aprintf(".%c", letters[index])
 	return fmt.aprintf(".elements[%d]", index)
+}
+
+// Length, then the bytes.
+emit_string_comparison :: proc(program: ^Program, scope: ^Scope, out: Output, node: ^ast.Binary_Expr) {
+	left_builder, right_builder := strings.builder_make(), strings.builder_make()
+	emit_expression(program, scope, &left_builder, node.left, nil)
+	emit_expression(program, scope, &right_builder, node.right, nil)
+	left, right := strings.to_string(left_builder), strings.to_string(right_builder)
+	fmt.sbprintf(out, "%s(%s.len == %s.len && memcmp(%s.data, %s.data, (size_t)%s.len) == 0)", "!" if node.op.text == "!=" else "", left, right, left, right, left)
 }
 
 emit_array_comparison :: proc(program: ^Program, scope: ^Scope, out: Output, node: ^ast.Binary_Expr, type: ^Type) {

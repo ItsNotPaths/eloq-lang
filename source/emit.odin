@@ -352,7 +352,9 @@ procedure_c_name :: proc(procedure: ^Procedure) -> string {
 
 foreign_signature :: proc(procedure: ^Procedure) -> string {
 	parameters: [dynamic]string
-	for argument in foreign_arguments(procedure.input.type, "") do append(&parameters, c_type_name(argument.type))
+	for argument in foreign_arguments(procedure.input.type, "") {
+		append(&parameters, strings.concatenate({c_type_name(argument.type), " *" if argument.type.kind == .Table else ""}))
+	}
 	return_type := c_type_name(procedure.output.type) if procedure.output != nil else "void"
 	return fmt.aprintf("%s %s(%s)", return_type, procedure.foreign_name, strings.join(parameters[:], ", "))
 }
@@ -512,9 +514,14 @@ Line_Emitter :: struct {
 // (hole parallel-lines :tags codegen) lines with disjoint write sets still run one after another.
 emit_line :: proc(program: ^Program, out: Output, line: Line, number: int, upper_name: string, cached: ^map[string]bool) {
 	parts := line.parts[:]
-	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line,  indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
+	emitter := Line_Emitter{program = program, out = out, number = number, source_line = line.location.line, indent = "\t\t", flow_count = 1, row_table = line.row_table, upper_name = upper_name, cached = cached}
 
 	fmt.sbprintf(out, "\t{{ // %s:%d\n", line.location.path, line.location.line)
+	if table := table_flow(program, parts); table != nil {
+		emit_parts(&emitter, parts[1:], table, fmt.aprintf("&state->%s", table.name), nil)
+		fmt.sbprintf(out, "\t}}\n")
+		return
+	}
 	outer_indent := emitter.indent
 	if line.row_table != nil {
 		fmt.sbprintf(out, "%sfor (int row = 0; row < state->%s.count; row += 1) {{\n", emitter.indent, line.row_table.name)
@@ -571,6 +578,7 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 				emit_row_store(out, indent, table, next_row, flow_variable)
 				fmt.sbprintf(out, "%sstate->%s.added += 1;\n", indent, table.name)
 			// (hole remove-write-back :tags tables :sev polish) |remove| shells still stores the unchanged row back.
+			case flow.kind == .Table:
 			case table != nil:
 				emit_row_store(out, indent, table, "row", flow_variable)
 			case:

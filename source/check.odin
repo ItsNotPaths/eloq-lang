@@ -281,7 +281,6 @@ check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 			complete_type(program, found)
 			slot.type = found
 		case ^Field:
-			// (hole whole-array-procs :tags tables) a slot on a table is one row; a foreign proc on a table should get Table * once.
 			slot.type = found.type.row if found.type.kind == .Table else found.type
 		case nil:
 			slot.type = column_type(program, slot.name, location)
@@ -306,12 +305,40 @@ check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
 
 check_foreign :: proc(program: ^Program, procedure: ^Procedure) {
 	scope := Scope{parsed = &procedure.parsed}
+	if table := table_named(program, procedure.foreign_types[0]); table != nil {
+		check_table_foreign(program, procedure, table)
+		return
+	}
 	for expression, index in procedure.foreign_types {
 		if expression == nil do continue
 		append(&procedure.slots, Slot{name = index == 0 ? "input" : "output", type = resolve_type(program, &scope, expression), read = index == 0, written = index == 1})
 	}
 	procedure.input = &procedure.slots[0]
 	if len(procedure.slots) == 2 do procedure.output = &procedure.slots[1]
+}
+
+// A foreign proc on a table gets the whole table once, changes it in place, and counts
+// as reading and writing all of it.
+check_table_foreign :: proc(program: ^Program, procedure: ^Procedure, table: ^Type) {
+	if output := procedure.foreign_types[1]; output != nil && table_named(program, output) != table {
+		fail(procedure.parsed.location, "%s takes %s, it can only give %s back", procedure.name, table.name, table.name)
+	}
+	append(&procedure.slots, Slot{name = "input", type = table, read = true})
+	procedure.input = &procedure.slots[0]
+	procedure.access.reads[column_name(table, "count")] = true
+	for column in table.fields {
+		procedure.access.reads[column_name(table, column.name)] = true
+		procedure.access.writes[column_name(table, column.name)] = true
+	}
+}
+
+// The table of `enemies |sort| enemies`, a line that hands a whole table to a foreign proc.
+table_flow :: proc(program: ^Program, parts: []Part) -> ^Type {
+	if len(parts) < 2 || parts[1].kind != .Procedure do return nil
+	procedure, is_procedure := program.names[parts[1].name].(^Procedure)
+	if !is_procedure || procedure.foreign_name == "" do return nil
+	table := table_named(program, parts[0].expression)
+	return table if table != nil && table_named(program, procedure.foreign_types[0]) == table else nil
 }
 
 // A column name as a slot label, when every table agrees on its type.
@@ -439,6 +466,10 @@ check_line :: proc(program: ^Program, line: ^Line) {
 	if len(parts) < 2 || parts[0].kind != .Data || parts[len(parts) - 1].kind != .Data {
 		fail(line.location, "a line needs data on both ends")
 	}
+	if table := table_flow(program, parts); table != nil {
+		check_parts(program, parts[1:], table, nil, nil, &line.access, line.location)
+		return
+	}
 	line.row_table = line_row_table(program, line)
 	last := &parts[len(parts) - 1]
 	if table := table_named(program, last.expression); table != nil && table != line.row_table {
@@ -503,6 +534,10 @@ check_parts :: proc(program: ^Program, parts: []Part, flow: ^Type, outer: ^Part,
 				fail(location, "a gate needs a bool, got %s", gate_type.name)
 			}
 		case .Data:
+			if flow.kind == .Table {
+				if table_named(program, part.expression) != flow do fail(location, "%s goes back to %s", flow.name, flow.name)
+				continue
+			}
 			note_write(program, access, part.expression)
 			if part.appends && access != nil do access.writes[column_name(table_named(program, part.expression), "added")] = true
 			if part.appends {

@@ -3,6 +3,9 @@ Fuel_State :: enum
 	low
 	empty
 
+crates :: table 4
+	weight : float
+
 Direction :: struct
 	y : float
 	x : float
@@ -21,8 +24,14 @@ square_root :: foreign "sqrtf" float |proc| float
 angle_of    :: foreign "atan2f" Direction |proc| float
 play_sound  :: foreign "play_sound" int |proc|
 read_gauge  :: foreign "read_gauge" int |proc| Fuel_State
+sort_crates :: foreign "sort_crates" crates |proc| crates
+
+double_weight ::
+	$float = float * 2
 
 area    |square_root| side
 heading |angle_of|    angle
 sound   |play_sound|  played
 gauge   |read_gauge|  fuel_state
+crates        |sort_crates|   crates
+crates.weight |double_weight| crates.weight

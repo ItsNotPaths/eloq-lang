@@ -27,6 +27,7 @@ Type :: struct {
 	alias:           ^ast.Expr, // named Array, until resolved
 	alias_parsed:    Parsed,
 	row:             ^Type, // Table: one row as a struct
+	capacity_name:   string, // Table: a named constant, until resolved
 	appends:         bool, // Table: some line adds rows
 	removes:         bool, // Table: some line removes rows
 }
@@ -189,7 +190,7 @@ build_program :: proc(items: []Item) -> Program {
 }
 
 add_name :: proc(program: ^Program, name: string, value: Name, location: Location) {
-	if name == "remove" || name == "count" || name == "capacity" || name == "abends" do fail(location, "%s is built in", name)
+	if name == "remove" || name == "abends" do fail(location, "%s is built in", name)
 	// (hole proc-overloading :tags types) one proc per name; procs should share a name when input slot types differ.
 	if name in program.names do fail(location, "%s is already defined", name)
 	program.names[name] = value
@@ -236,15 +237,17 @@ parse_fields :: proc(item: Item) -> [dynamic]^Field {
 // A table is stored data. Its type is not a name; its row type is.
 add_table :: proc(program: ^Program, name: string, header: string, item: Item) {
 	location := item.header.location
-	capacity, ok := strconv.parse_int(strings.trim_space(header[len("table "):]), 10)
-	if !ok || capacity < 1 do fail(location, "a table needs a positive capacity: %s :: table 512", name)
+	capacity_text := strings.trim_space(header[len("table "):])
+	capacity, is_number := strconv.parse_int(capacity_text, 10)
+	if is_number && capacity < 1 do fail(location, "a table needs a positive capacity: %s :: table 512", name)
 	columns := parse_fields(item)
 	for column in columns {
-		if column.name == "count" || column.name == "removed" do fail(column.location, "%s is kept for the table itself", column.name)
+		if is_table_count(column.name) || column.name == "removed" do fail(column.location, "%s is kept for the table itself", column.name)
 	}
 	row := new_clone(Type{name = strings.concatenate({strings.to_ada_case(name), "_Row"}), kind = .Struct, location = location, fields = columns})
 	add_type(program, row)
 	table := new_clone(Type{name = name, kind = .Table, location = location, fields = columns, count = capacity, row = row})
+	if !is_number do table.capacity_name = capacity_text
 	append(&program.types, table)
 	field := new_clone(Field{name = name, location = location, type = table})
 	add_name(program, name, field, location)

@@ -83,6 +83,10 @@ check_program :: proc(program: ^Program) {
 }
 
 complete_type :: proc(program: ^Program, type: ^Type) {
+	if type.capacity_name != "" {
+		type.count = constant_count(program, type.capacity_name, type.location)
+		type.capacity_name = ""
+	}
 	if type.alias != nil {
 		scope := Scope{parsed = &type.alias_parsed}
 		array, ok := type.alias.derived.(^ast.Array_Type)
@@ -121,10 +125,26 @@ resolve_type :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) ->
 array_shape :: proc(program: ^Program, scope: ^Scope, array: ^ast.Array_Type) -> (element: ^Type, count: int) {
 	location := node_location(scope, array)
 	if array.len == nil do fail(location, "an array needs a fixed length")
-	literal, ok := array.len.derived.(^ast.Basic_Lit)
-	if !ok || literal.tok.kind != .Integer do fail(location, "an array needs a fixed integer length")
-	count, _ = strconv.parse_int(literal.tok.text)
+	if name, is_name := array.len.derived.(^ast.Ident); is_name {
+		count = constant_count(program, name.name, location)
+	} else {
+		literal, ok := array.len.derived.(^ast.Basic_Lit)
+		if !ok || literal.tok.kind != .Integer do fail(location, "an array needs a fixed integer length")
+		count, _ = strconv.parse_int(literal.tok.text)
+	}
 	return resolve_type(program, scope, array.elem), count
+}
+
+// A size given by name: `shell_capacity :: 512`.
+constant_count :: proc(program: ^Program, name: string, location: Location) -> int {
+	count := 0
+	if definition, is_definition := program.names[name].(^Definition); is_definition {
+		if literal, is_literal := definition.expression.derived.(^ast.Basic_Lit); is_literal && literal.tok.kind == .Integer {
+			count, _ = strconv.parse_int(literal.tok.text)
+		}
+	}
+	if count < 1 do fail(location, "%s must be a positive integer constant", name)
+	return count
 }
 
 check_field :: proc(program: ^Program, field: ^Field) {
@@ -279,9 +299,7 @@ gather_names :: proc(expression: ^ast.Expr) -> [dynamic]^ast.Ident {
 		case ^ast.Field_Value:
 			gather(node.value, names)
 		case ^ast.Call_Expr:
-			if !is_table_call(node) {
-				for argument in node.args do gather(argument, names)
-			}
+			for argument in node.args do gather(argument, names)
 		}
 	}
 	gather(expression, &names)
@@ -300,9 +318,9 @@ math_arity :: proc(name: string) -> int {
 	return 0
 }
 
-is_table_call :: proc(call: ^ast.Call_Expr) -> bool {
-	name, is_name := call.expr.derived.(^ast.Ident)
-	return is_name && (name.name == "count" || name.name == "capacity")
+// `shells.count` is the rows at step start, `shells.added` the adds waiting on step end.
+is_table_count :: proc(name: string) -> bool {
+	return name == "count" || name == "added"
 }
 
 // The name an assignment target hangs off: `a` in `a.b.c`.
@@ -651,9 +669,10 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 			fail(location, "%s has no case %s", enum_type.name, node.field.name)
 		}
 		if table := table_named(program, node.expr); table != nil && find_slot(scope.procedure, table.name) == nil {
-			use_row(scope, table, location)
 			scope.touches_state = true
 			note_read(scope, column_name(table, node.field.name))
+			if is_table_count(node.field.name) do return builtin_type("int")
+			use_row(scope, table, location)
 			return struct_field(table.row, node.field.name, location).type
 		}
 		base := type_of(program, scope, node.expr)
@@ -700,17 +719,8 @@ type_of :: proc(program: ^Program, scope: ^Scope, expression: ^ast.Expr) -> ^Typ
 	case ^ast.Call_Expr:
 		name, is_name := node.expr.derived.(^ast.Ident)
 		if !is_name do fail(location, "call a function by name")
-		if is_table_call(node) {
-			table := table_named(program, node.args[0]) if len(node.args) == 1 else nil
-			if table == nil do fail(location, "%s takes a table", name.name)
-			if name.name == "count" {
-				scope.touches_state = true
-				note_read(scope, column_name(table, "count"))
-			}
-			return builtin_type("int")
-		}
 		arity := math_arity(name.name)
-		if arity == 0 do fail(location, "%s is not a function: calls are count, capacity and C math", name.name)
+		if arity == 0 do fail(location, "%s is not a function: calls are C math", name.name)
 		if len(node.args) != arity do fail(location, "%s takes %d values", name.name, arity)
 		result := type_of(program, scope, node.args[0])
 		for argument in node.args[1:] do result = arithmetic_type(result, type_of(program, scope, argument), location)

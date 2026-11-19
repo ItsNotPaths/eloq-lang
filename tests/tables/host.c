@@ -12,7 +12,7 @@ int main(void) {
 		state.shells.velocity[row] = (Vector){{0, 0, 1}};
 	}
 	assert(launch_site(&state) == 0);
-	assert(state.shells.count == 3);
+	assert(state.shells.count == 3);   // room counts the pending add, so the second fire is gated off
 	// row 0 ran out and was swapped for the new shell, which no line saw this step
 	assert(state.shells.lifetime[0] == 3.0f);
 	assert(state.shells.velocity[0].y == 2.0f && state.shells.position[0].z == 0.0f);

@@ -70,9 +70,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	for field in program.fields {
 		emit_state_checks(out, field.type, fmt.aprintf("state->%s", field.name), upper_name, field.location.line, "-1", 1)
 	}
-	for table in tables {
-		if table.appends do fmt.sbprintf(out, "\tint %s_added = 0;\n", table.name)
-	}
+	for table in tables do fmt.sbprintf(out, "\tstate->%s.added = 0;\n", table.name)
 	emit_lines(program, out, upper_name)
 	for table in tables do emit_row_changes(out, table)
 	fmt.sbprintf(out, "\treturn state->abends.count + state->abends.dropped;\n}}\n")
@@ -113,7 +111,7 @@ emit_type :: proc(out: Output, type: ^Type, emitted: ^map[^Type]bool) {
 		emit_type(out, type.row, emitted)
 		fmt.sbprintf(out, "typedef struct {{\n")
 		for field in type.fields do fmt.sbprintf(out, "\t%s %s[%d];\n", c_type_name(field.type), field.name, type.count)
-		fmt.sbprintf(out, "\tint count;\n\tuint8_t removed[%d];\n}} %s;\n\n", type.count, c_type_name(type))
+		fmt.sbprintf(out, "\tint count;\n\tint added;\n\tuint8_t removed[%d];\n}} %s;\n\n", type.count, c_type_name(type))
 	}
 }
 
@@ -128,6 +126,7 @@ emit_abend_procs :: proc(out: Output, tables: [dynamic]^Type, abend_type, state_
 	fmt.sbprintf(out, "\tstate->abends.entries[state->abends.count++] = (%s_Entry){{code, line, row, value}};\n}}\n\n", abend_type)
 	fmt.sbprintf(out, "static inline int stop_step(%s *state) {{\n", state_type)
 	for table in tables {
+		if table.appends do fmt.sbprintf(out, "\tstate->%s.added = 0;\n", table.name)
 		if table.removes do fmt.sbprintf(out, "\tmemset(state->%s.removed, 0, sizeof state->%s.removed);\n", table.name, table.name)
 	}
 	fmt.sbprintf(out, "\treturn state->abends.count + state->abends.dropped;\n}}\n\n")
@@ -149,7 +148,7 @@ state_tables :: proc(program: ^Program) -> [dynamic]^Type {
 // Rows added or removed during the step land here: new rows count, then removed
 // rows are swapped out for the last row.
 emit_row_changes :: proc(out: Output, table: ^Type) {
-	if table.appends do fmt.sbprintf(out, "\tstate->%s.count += %s_added;\n", table.name, table.name)
+	if table.appends do fmt.sbprintf(out, "\tstate->%s.count += state->%s.added;\n\tstate->%s.added = 0;\n", table.name, table.name, table.name)
 	if !table.removes do return
 	fmt.sbprintf(out, "\tfor (int row = 0; row < state->%s.count;) {{\n", table.name)
 	fmt.sbprintf(out, "\t\tif (!state->%s.removed[row]) {{\n\t\t\trow += 1;\n\t\t\tcontinue;\n\t\t}}\n", table.name)
@@ -407,9 +406,10 @@ emit_parts :: proc(emitter: ^Line_Emitter, parts: []Part, flow: ^Type, flow_vari
 			table := table_named(program, part.expression)
 			switch {
 			case part.appends:
-				emit_abcont(emitter, fmt.aprintf("state->%s.count + %s_added >= %d", table.name, table.name, table.count), "TABLE_FULL", "0")
-				emit_row_store(out, indent, table, fmt.aprintf("state->%s.count + %s_added", table.name, table.name), flow_variable)
-				fmt.sbprintf(out, "%s%s_added += 1;\n", indent, table.name)
+				next_row := fmt.aprintf("state->%s.count + state->%s.added", table.name, table.name)
+				emit_abcont(emitter, fmt.aprintf("%s >= %d", next_row, table.count), "TABLE_FULL", "0")
+				emit_row_store(out, indent, table, next_row, flow_variable)
+				fmt.sbprintf(out, "%sstate->%s.added += 1;\n", indent, table.name)
 			// (hole remove-write-back :tags tables :sev polish) |remove| shells still stores the unchanged row back.
 			case table != nil:
 				emit_row_store(out, indent, table, "row", flow_variable)
@@ -627,7 +627,7 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 			return
 		}
 		if table := table_named(program, node.expr); table != nil && find_slot(scope.procedure, table.name) == nil {
-			fmt.sbprintf(out, "state->%s.%s[row]", table.name, node.field.name)
+			fmt.sbprintf(out, "state->%s.%s%s", table.name, node.field.name, "" if is_table_count(node.field.name) else "[row]")
 			emit_element(out, type, element)
 			return
 		}
@@ -673,13 +673,6 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 		fmt.sbprintf(out, " }}")
 	case ^ast.Call_Expr:
 		name := node.expr.derived.(^ast.Ident).name
-		if is_table_call(node) {
-			table := table_named(program, node.args[0])
-			// (hole pending-count :tags tables) count() and capacity() are calls; should be shells.count and shells.added fields, capacity a plain constant.
-			if name == "count" do fmt.sbprintf(out, "state->%s.count", table.name)
-			else do fmt.sbprintf(out, "%d", table.count)
-			return
-		}
 		scalar := type.element if type.kind == .Array else type
 		fmt.sbprintf(out, "%s%s(", name, "f" if scalar.name == "float" else "")
 		for argument, index in node.args {
@@ -693,12 +686,10 @@ emit_expression :: proc(program: ^Program, scope: ^Scope, out: Output, expressio
 // Expressions that are built per element, rather than read whole.
 distributes :: proc(expression: ^ast.Expr) -> bool {
 	#partial switch node in expression.derived {
-	case ^ast.Binary_Expr, ^ast.Unary_Expr, ^ast.Comp_Lit, ^ast.Basic_Lit:
+	case ^ast.Binary_Expr, ^ast.Unary_Expr, ^ast.Comp_Lit, ^ast.Basic_Lit, ^ast.Call_Expr:
 		return true
 	case ^ast.Paren_Expr:
 		return distributes(node.expr)
-	case ^ast.Call_Expr:
-		return !is_table_call(node)
 	}
 	return false
 }

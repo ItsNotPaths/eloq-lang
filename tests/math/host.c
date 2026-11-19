@@ -8,6 +8,7 @@ int main(void) {
 	assert(math_use(&state) == 0);
 	assert(state.speed == 5.0f);                        // built-in math.eloq
 	assert(state.unit.x == 0.6f && state.unit.y == 0.8f);
+	assert(state.flat_speed == 10.0f && state.flat_unit.y == 0.8f);   // the flow picks the proc
 	assert(state.angle == atan2f(4, 3));                // C math in a body
 	assert(state.rounded.x == 1 && state.rounded.y == 3 && state.rounded.z == 0);   // per element
 	assert(state.circle == 6.28318530717958647692f);

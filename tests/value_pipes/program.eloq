@@ -1,0 +1,26 @@
+insert math
+
+enemies :: table 4
+	position : Vector3
+
+state value_pipes
+	position    := Vector3{0, 0, 0}
+	destination := Vector3{3, 0, 0}
+	target      := 0
+	distance    := 0.0
+	later       := 0.0
+
+offset_from_player ::
+	$Vector3 = Vector3 - position
+
+copy_vector ::
+	$Vector3 = Vector3
+
+copy_float ::
+	$float = float
+
+target_distance :: enemies[target].position |offset_from_player| |length|
+
+target_distance |copy_float|  distance
+destination     |copy_vector| position
+target_distance |copy_float|  later

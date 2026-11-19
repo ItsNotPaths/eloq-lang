@@ -195,12 +195,38 @@ check_definition :: proc(program: ^Program, definition: ^Definition) {
 	scope := Scope{parsed = &definition.parsed, row_open = true, access = &definition.access}
 	type := type_of(program, &scope, definition.expression)
 	definition.row_table = scope.row_table
-	definition.constant = !scope.touches_state
+	if len(definition.pipe) > 0 do type = check_value_pipe(program, definition, default_type(type))
+	definition.constant = !scope.touches_state && len(definition.pipe) == 0
 	definition.type = definition.constant ? type : default_type(type)
 	definition.status = .Checked
 }
 
+// A value has no side effects, so its procs may not write state or call C.
+check_value_pipe :: proc(program: ^Program, definition: ^Definition, flow: ^Type) -> ^Type {
+	location := definition.parsed.location
+	flow := flow
+	for part in definition.pipe {
+		procedure, ok := program.names[part.name].(^Procedure)
+		if !ok do fail(location, "%s is not a proc", part.name)
+		if procedure.foreign_name != "" do fail(location, "%s calls C, a value cannot", part.name)
+		check_procedure(program, procedure)
+		if len(procedure.access.writes) > 0 do fail(location, "%s writes state, a value cannot", part.name)
+		flow = check_call(program, procedure, flow, nil, definition.row_table, location)
+		merge_access(&definition.access, procedure.access)
+	}
+	return flow
+}
+
 check_procedure :: proc(program: ^Program, procedure: ^Procedure) {
+	switch procedure.status {
+	case .Checked:
+		return
+	case .Checking:
+		fail(procedure.parsed.location, "%s is defined in terms of itself", procedure.name)
+	case .Unchecked:
+	}
+	procedure.status = .Checking
+	defer procedure.status = .Checked
 	location := procedure.parsed.location
 	scope := Scope{parsed = &procedure.parsed, procedure = procedure, access = &procedure.access}
 	if procedure.foreign_name != "" {

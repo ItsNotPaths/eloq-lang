@@ -40,7 +40,7 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	for match in program.matches {
 		if !match.has_pipes do append(&value_matches, match)
 	}
-	for definition in values do fmt.sbprintf(out, "%s;\n", value_signature(definition.name, definition.type, definition.row_table, definition.access.indexes, state_type))
+	for definition in values do fmt.sbprintf(out, "%s;\n", value_signature(definition.name, definition.type, definition.row_table, writes_state(definition), state_type))
 	for match in value_matches do fmt.sbprintf(out, "%s;\n", value_signature(match.name, match.type, match.row_table, match.access.indexes, state_type))
 	for procedure in program.procedures {
 		signature := foreign_signature(procedure) if procedure.foreign_name != "" else procedure_signature(program, procedure, state_type)
@@ -48,8 +48,12 @@ emit_program :: proc(program: ^Program, header_name: string) -> (header: string,
 	}
 	for definition in values {
 		scope := Scope{parsed = &definition.parsed, row_table = definition.row_table}
-		fmt.sbprintf(out, "\n%s {{\n", value_signature(definition.name, definition.type, definition.row_table, definition.access.indexes, state_type))
+		fmt.sbprintf(out, "\n%s {{\n", value_signature(definition.name, definition.type, definition.row_table, writes_state(definition), state_type))
 		emit_index_checks(program, &scope, out, "\t", {definition.expression}, table_row(definition.row_table), zero_return(definition.type))
+		if len(definition.pipe) > 0 {
+			emit_value_pipe(program, &scope, out, definition)
+			continue
+		}
 		fmt.sbprintf(out, "\treturn ")
 		emit_expression(program, &scope, out, definition.expression, definition.type)
 		fmt.sbprintf(out, ";\n}}\n")
@@ -200,10 +204,34 @@ on_demand_values :: proc(program: ^Program) -> [dynamic]^Definition {
 	return values
 }
 
-// A value that indexes can record an abcont, so it takes state as writable.
-value_signature :: proc(name: string, type: ^Type, row_table: ^Type, indexes: bool, state_type: string) -> string {
+value_signature :: proc(name: string, type: ^Type, row_table: ^Type, writable: bool, state_type: string) -> string {
 	row := ", int row" if row_table != nil else ""
-	return fmt.aprintf("static inline %s value_%s(%s%s *state%s)", c_type_name(type), name, "" if indexes else "const ", state_type, row)
+	return fmt.aprintf("static inline %s value_%s(%s%s *state%s)", c_type_name(type), name, "" if writable else "const ", state_type, row)
+}
+
+// A value that indexes can record an abcont, and procs take state as writable.
+writes_state :: proc(definition: ^Definition) -> bool {
+	return definition.access.indexes || len(definition.pipe) > 0
+}
+
+emit_value_pipe :: proc(program: ^Program, scope: ^Scope, out: Output, definition: ^Definition) {
+	flow := default_type(type_of(program, scope, definition.expression))
+	fmt.sbprintf(out, "\t%s flow_1 = ", c_type_name(flow))
+	emit_expression(program, scope, out, definition.expression, flow)
+	fmt.sbprintf(out, ";\n")
+	flow_variable := "flow_1"
+	no_cache: map[string]bool
+	for part, index in definition.pipe {
+		procedure := program.names[part.name].(^Procedure)
+		call := procedure_call(program, procedure, flow_variable, nil, definition.row_table, &no_cache)
+		if procedure.output == nil {
+			fmt.sbprintf(out, "\t%s;\n", call)
+			continue
+		}
+		flow_variable = fmt.aprintf("flow_%d", index + 2)
+		fmt.sbprintf(out, "\t%s %s = %s;\n", c_type_name(procedure.output.type), flow_variable, call)
+	}
+	fmt.sbprintf(out, "\treturn %s;\n}}\n", flow_variable)
 }
 
 table_row :: proc(row_table: ^Type) -> string {

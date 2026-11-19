@@ -66,6 +66,7 @@ Definition :: struct {
 	row_table:  ^Type, // set when it reads columns: one value per row
 	access:     Access,
 	status:     Check_Status,
+	pipe:       [dynamic]Part, // procs the expression flows through, for a value defined by a pipe
 }
 
 Slot :: struct {
@@ -84,6 +85,7 @@ Procedure :: struct {
 	input:  ^Slot, // the read-only slot
 	output: ^Slot, // the written slot
 	access: Access,
+	status: Check_Status,
 }
 
 // `name :: ?subject?` with one arm per case. Value arms make an on-demand value,
@@ -193,6 +195,19 @@ build_program :: proc(items: []Item) -> Program {
 	return program
 }
 
+// `target_distance :: enemies[target].position |offset| |length|`: no destination, the last flow is the value.
+add_value_pipe :: proc(program: ^Program, name: string, text: string, location: Location) {
+	line := parse_line(Source_Line{location = location, text = text})
+	if line.repeat_count > 0 || line.parts[0].kind != .Data do fail(location, "a value pipe starts with data")
+	for part in line.parts[1:] {
+		if part.kind != .Procedure do fail(location, "a value pipe holds procs only, no gates or data")
+	}
+	definition := new_clone(Definition{name = name, expression = line.parts[0].expression, parsed = line.parts[0].parsed})
+	append(&definition.pipe, ..line.parts[1:])
+	add_name(program, name, definition, location)
+	append(&program.definitions, definition)
+}
+
 add_name :: proc(program: ^Program, name: string, value: Name, location: Location) {
 	if name == "remove" || name == "abends" do fail(location, "%s is built in", name)
 	// (hole proc-overloading :tags types) one proc per name; procs should share a name when input slot types differ.
@@ -223,9 +238,8 @@ add_definition :: proc(program: ^Program, item: Item) {
 		add_table(program, name, rest, item)
 	case strings.has_prefix(rest, "foreign "):
 		add_foreign(program, name, rest, location)
-	// (hole pipe-values :tags types) a value defined by a pipe, `enemies[target].position |length|`, is not parsed.
 	case strings.has_suffix(rest, "|"):
-		fail(location, "values defined by a pipe are not built yet")
+		add_value_pipe(program, name, rest, location)
 	case:
 		add_declaration(program, item.header.text, location)
 	}
